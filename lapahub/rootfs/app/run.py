@@ -53,19 +53,37 @@ def get_supervisor_token() -> str | None:
         logger.info("Got HASSIO_TOKEN from environment")
         return token
 
-    # Try reading from file
+    # Try s6-overlay container environment directory
+    s6_env_path = Path("/run/s6/container_environment/SUPERVISOR_TOKEN")
+    if s6_env_path.exists():
+        token = s6_env_path.read_text().strip()
+        if token:
+            logger.info("Got token from s6 container environment")
+            return token
+
+    # Try reading from standard supervisor token file
     logger.info(f"Token file exists: {SUPERVISOR_TOKEN_PATH.exists()}")
     if SUPERVISOR_TOKEN_PATH.exists():
         token = SUPERVISOR_TOKEN_PATH.read_text().strip()
         logger.info(f"Got token from file, length: {len(token)}")
         return token
 
-    # List /run/supervisor to debug
-    supervisor_path = Path("/run/supervisor")
-    if supervisor_path.exists():
-        logger.info(f"Contents of /run/supervisor: {list(supervisor_path.iterdir())}")
-    else:
-        logger.info("/run/supervisor does not exist")
+    # Try /data/supervisor_token (some addons use this)
+    data_token_path = Path("/data/supervisor_token")
+    if data_token_path.exists():
+        token = data_token_path.read_text().strip()
+        if token:
+            logger.info("Got token from /data/supervisor_token")
+            return token
+
+    # List various paths to debug
+    for check_path in ["/run/supervisor", "/run/s6", "/var/run"]:
+        p = Path(check_path)
+        if p.exists():
+            try:
+                logger.info(f"Contents of {check_path}: {list(p.iterdir())[:10]}")
+            except Exception as e:
+                logger.info(f"Cannot list {check_path}: {e}")
 
     logger.warning("No supervisor token found - HA API calls will fail")
     return None
@@ -100,7 +118,7 @@ class LapaHubAddon:
 
     async def start(self):
         """Start the addon."""
-        logger.info("Starting LapaHub Addon v1.0.14")
+        logger.info("Starting LapaHub Addon v1.0.15")
         logger.info(f"Hub ID: {self.hub_id}")
         logger.info(f"Supervisor token present: {bool(SUPERVISOR_TOKEN)}")
         logger.info(f"Supervisor token length: {len(SUPERVISOR_TOKEN) if SUPERVISOR_TOKEN else 0}")
