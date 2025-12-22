@@ -84,7 +84,7 @@ class LapaHubAddon:
 
     async def start(self):
         """Start the addon."""
-        logger.info("Starting LapaHub Addon v1.0.7")
+        logger.info("Starting LapaHub Addon v1.0.8")
         logger.info(f"Hub ID: {self.hub_id}")
         logger.info(f"Supervisor token present: {bool(SUPERVISOR_TOKEN)}")
         logger.info(f"Supervisor token length: {len(SUPERVISOR_TOKEN) if SUPERVISOR_TOKEN else 0}")

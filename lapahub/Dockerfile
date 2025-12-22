@@ -15,10 +15,9 @@ RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
 # Copy application
 COPY rootfs/ /
 
-# Set permissions
+# Set permissions for service scripts
 RUN chmod a+x /app/run.py && \
-    chmod a+x /etc/s6-overlay/s6-rc.d/lapahub/run
+    chmod a+x /etc/services.d/lapahub/run && \
+    chmod a+x /etc/services.d/lapahub/finish
 
 WORKDIR /app
-
-# s6-overlay handles startup (no CMD needed)
