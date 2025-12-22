@@ -1,0 +1,23 @@
+#!/command/with-contenv bashio
+# ==============================================================================
+# LapaHub Bridge Service
+# ==============================================================================
+
+bashio::log.info "Starting LapaHub Bridge..."
+
+# Get configuration
+HUB_ID=$(bashio::config 'hub_id')
+API_KEY=$(bashio::config 'api_key')
+SYNC_INTERVAL=$(bashio::config 'sync_interval_seconds')
+ENERGY_INTERVAL=$(bashio::config 'energy_report_interval_seconds')
+LOG_LEVEL=$(bashio::config 'log_level')
+
+# Export environment variables
+export HUB_ID
+export API_KEY
+export SYNC_INTERVAL
+export ENERGY_INTERVAL
+export LOG_LEVEL
+
+# Run the Python application
+exec python3 /app/run.py

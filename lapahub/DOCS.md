@@ -58,7 +58,7 @@ This addon connects your Home Assistant to LapaHub cloud for smart energy manage
 2. Go to **Settings** → **Add-ons** → **Add-on Store**
 3. Click the three dots (⋮) in the top right corner
 4. Select **Repositories**
-5. Add this URL: `https://github.com/skhokho/lapahub-addon`
+5. Add this URL: `https://github.com/skhokho/lapahub`
 6. Click **Add** → **Close**
 
 ### Step 2: Install Addon
@@ -264,6 +264,6 @@ A: The addon uses a Supervisor token, not your password. Changing your password 
 
 ## Support
 
-- **Issues**: [github.com/skhokho/lapahub-addon/issues](https://github.com/skhokho/lapahub-addon/issues)
+- **Issues**: [github.com/skhokho/lapahub/issues](https://github.com/skhokho/lapahub/issues)
 - **Email**: support@lapahub.co.za
 - **Documentation**: [lapahub.co.za/docs](https://lapahub.co.za/docs)
