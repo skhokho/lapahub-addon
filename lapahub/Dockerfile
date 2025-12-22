@@ -15,9 +15,8 @@ RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
 # Copy application
 COPY rootfs/ /
 
-# Set permissions for service scripts
+# Set permissions
 RUN chmod a+x /app/run.py && \
-    chmod a+x /etc/services.d/lapahub/run && \
-    chmod a+x /etc/services.d/lapahub/finish
+    chmod a+x /etc/services.d/lapahub/run
 
 WORKDIR /app
