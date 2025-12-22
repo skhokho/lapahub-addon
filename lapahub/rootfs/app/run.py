@@ -35,23 +35,39 @@ HA_BASE_URL = "http://supervisor/core"
 
 def get_supervisor_token() -> str | None:
     """Get supervisor token from environment or file."""
+    # Log all SUPERVISOR related env vars for debugging
+    supervisor_vars = {k: v[:20] + "..." if len(v) > 20 else v
+                       for k, v in os.environ.items()
+                       if "SUPERVISOR" in k.upper() or "HASSIO" in k.upper()}
+    logger.info(f"Supervisor-related env vars: {supervisor_vars}")
+
     # Try environment variable first
     token = os.environ.get("SUPERVISOR_TOKEN")
     if token:
         logger.info("Got SUPERVISOR_TOKEN from environment")
         return token
-    # Try reading from file (for init: false mode)
+
+    # Try HASSIO_TOKEN (older name)
+    token = os.environ.get("HASSIO_TOKEN")
+    if token:
+        logger.info("Got HASSIO_TOKEN from environment")
+        return token
+
+    # Try reading from file
     logger.info(f"Token file exists: {SUPERVISOR_TOKEN_PATH.exists()}")
     if SUPERVISOR_TOKEN_PATH.exists():
         token = SUPERVISOR_TOKEN_PATH.read_text().strip()
         logger.info(f"Got token from file, length: {len(token)}")
         return token
+
     # List /run/supervisor to debug
     supervisor_path = Path("/run/supervisor")
     if supervisor_path.exists():
         logger.info(f"Contents of /run/supervisor: {list(supervisor_path.iterdir())}")
     else:
         logger.info("/run/supervisor does not exist")
+
+    logger.warning("No supervisor token found - HA API calls will fail")
     return None
 
 SUPERVISOR_TOKEN = get_supervisor_token()
@@ -84,7 +100,7 @@ class LapaHubAddon:
 
     async def start(self):
         """Start the addon."""
-        logger.info("Starting LapaHub Addon v1.0.8")
+        logger.info("Starting LapaHub Addon v1.0.11")
         logger.info(f"Hub ID: {self.hub_id}")
         logger.info(f"Supervisor token present: {bool(SUPERVISOR_TOKEN)}")
         logger.info(f"Supervisor token length: {len(SUPERVISOR_TOKEN) if SUPERVISOR_TOKEN else 0}")

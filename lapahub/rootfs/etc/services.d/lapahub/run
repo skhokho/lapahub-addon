@@ -1,8 +1,0 @@
-#!/usr/bin/with-contenv bash
-# ==============================================================================
-# LapaHub Addon service
-# ==============================================================================
-
-echo "Starting LapaHub Bridge service..."
-
-exec python3 /app/run.py

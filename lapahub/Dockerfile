@@ -9,10 +9,11 @@ COPY requirements.txt /tmp/
 RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 
 # Copy application
-COPY rootfs/ /
+COPY rootfs/app /app
 
 # Set permissions
-RUN chmod a+x /app/run.py && \
-    chmod a+x /etc/services.d/lapahub/run
+RUN chmod a+x /app/run.py
 
 WORKDIR /app
+
+CMD ["python3", "/app/run.py"]
