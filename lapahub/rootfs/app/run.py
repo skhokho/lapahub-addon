@@ -38,10 +38,20 @@ def get_supervisor_token() -> str | None:
     # Try environment variable first
     token = os.environ.get("SUPERVISOR_TOKEN")
     if token:
+        logger.info("Got SUPERVISOR_TOKEN from environment")
         return token
     # Try reading from file (for init: false mode)
+    logger.info(f"Token file exists: {SUPERVISOR_TOKEN_PATH.exists()}")
     if SUPERVISOR_TOKEN_PATH.exists():
-        return SUPERVISOR_TOKEN_PATH.read_text().strip()
+        token = SUPERVISOR_TOKEN_PATH.read_text().strip()
+        logger.info(f"Got token from file, length: {len(token)}")
+        return token
+    # List /run/supervisor to debug
+    supervisor_path = Path("/run/supervisor")
+    if supervisor_path.exists():
+        logger.info(f"Contents of /run/supervisor: {list(supervisor_path.iterdir())}")
+    else:
+        logger.info("/run/supervisor does not exist")
     return None
 
 SUPERVISOR_TOKEN = get_supervisor_token()
@@ -74,7 +84,7 @@ class LapaHubAddon:
 
     async def start(self):
         """Start the addon."""
-        logger.info("Starting LapaHub Addon v1.0.2")
+        logger.info("Starting LapaHub Addon v1.0.5")
         logger.info(f"Hub ID: {self.hub_id}")
         logger.info(f"Supervisor token present: {bool(SUPERVISOR_TOKEN)}")
         logger.info(f"Supervisor token length: {len(SUPERVISOR_TOKEN) if SUPERVISOR_TOKEN else 0}")
