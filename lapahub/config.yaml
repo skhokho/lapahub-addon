@@ -1,0 +1,46 @@
+name: LapaHub Bridge
+version: "1.0.0"
+slug: lapahub
+description: Connect your Home Assistant to LapaHub for smart energy management
+url: https://github.com/skhokho/lapahub-addon
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+startup: application
+boot: auto
+hassio_api: true
+homeassistant_api: true
+auth_api: true
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:home-lightning-bolt
+panel_title: LapaHub
+
+options:
+  hub_id: ""
+  api_key: ""
+  sync_interval_seconds: 60
+  energy_report_interval_seconds: 300
+  log_level: info
+
+schema:
+  hub_id: str
+  api_key: password
+  sync_interval_seconds: int(30,3600)
+  energy_report_interval_seconds: int(60,3600)
+  log_level: list(debug|info|warning|error)
+
+ports:
+  8099/tcp: null
+
+ports_description:
+  8099/tcp: Web interface
+
+map:
+  - config:rw
+
+environment:
+  FIREBASE_PROJECT_ID: lapahub-dev-c8872

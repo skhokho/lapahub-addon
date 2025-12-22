@@ -1,0 +1,16 @@
+configuration:
+  hub_id:
+    name: Hub ID
+    description: Your LapaHub Hub ID (found in the LapaHub app)
+  api_key:
+    name: API Key
+    description: Your LapaHub API key for authentication
+  sync_interval_seconds:
+    name: Sync Interval
+    description: How often to sync devices with LapaHub cloud (in seconds)
+  energy_report_interval_seconds:
+    name: Energy Report Interval
+    description: How often to report energy data (in seconds)
+  log_level:
+    name: Log Level
+    description: Logging verbosity level
