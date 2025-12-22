@@ -29,9 +29,22 @@ logging.basicConfig(
 logger = logging.getLogger("lapahub")
 
 # Configuration
-SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN")
-HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
+SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
+HA_BASE_URL = "http://supervisor/core"
+
+def get_supervisor_token() -> str | None:
+    """Get supervisor token from environment or file."""
+    # Try environment variable first
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if token:
+        return token
+    # Try reading from file (for init: false mode)
+    if SUPERVISOR_TOKEN_PATH.exists():
+        return SUPERVISOR_TOKEN_PATH.read_text().strip()
+    return None
+
+SUPERVISOR_TOKEN = get_supervisor_token()
 
 
 class LapaHubAddon:
