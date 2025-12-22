@@ -61,11 +61,17 @@ class LapaHubAddon:
 
     async def start(self):
         """Start the addon."""
-        logger.info("Starting LapaHub Addon v1.0.0")
+        logger.info("Starting LapaHub Addon v1.0.2")
+        logger.info(f"Hub ID: {self.hub_id}")
+        logger.info(f"Supervisor token present: {bool(SUPERVISOR_TOKEN)}")
+        logger.info(f"Supervisor token length: {len(SUPERVISOR_TOKEN) if SUPERVISOR_TOKEN else 0}")
 
         if not self.hub_id or not self.api_key:
             logger.error("Hub ID and API Key must be configured in addon options")
             return
+
+        if not SUPERVISOR_TOKEN:
+            logger.warning("SUPERVISOR_TOKEN not found - HA API access will fail")
 
         # Create aiohttp session
         self.session = aiohttp.ClientSession()
