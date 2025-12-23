@@ -106,6 +106,10 @@ class LapaHubAddon:
         self.energy_interval = self.options.get("energy_report_interval_seconds", 300)
         self.firebase_project = os.environ.get("FIREBASE_PROJECT_ID", "lapahub-dev-c8872")
 
+        # Sensor realtime config (BETA: default off to reduce Firestore writes)
+        self.sensor_realtime = self.options.get("sensor_realtime", False)
+        self.sensor_poll_interval = self.options.get("sensor_poll_interval_seconds", 30)
+
         self.session: aiohttp.ClientSession | None = None
         self.devices: dict = {}
         self.running = True
@@ -167,7 +171,8 @@ class LapaHubAddon:
 
     async def start(self):
         """Start the addon."""
-        logger.info("Starting LapaHub Addon v1.0.0")
+        logger.info("Starting LapaHub Addon v1.0.20")
+        logger.info(f"Realtime mode: commands=always, binary_sensors=always, sensors={'realtime' if self.sensor_realtime else f'polling ({self.sensor_poll_interval}s)'}")
 
         # Set up signal handlers for graceful shutdown
         loop = asyncio.get_running_loop()
@@ -187,7 +192,7 @@ class LapaHubAddon:
 
             # Start background tasks
             self.log_activity("Starting background tasks")
-            await asyncio.gather(
+            tasks = [
                 self.device_sync_loop(),
                 self.command_listener_loop(),
                 self.energy_report_loop(),
@@ -196,7 +201,11 @@ class LapaHubAddon:
                 self.heartbeat_loop(),          # LAPA-75: Health heartbeat
                 self.scene_sync_loop(),         # LAPA-78: Sync scenes/automations
                 self.run_web_server(),
-            )
+            ]
+            # Add sensor polling loop only if sensors are not realtime
+            if not self.sensor_realtime:
+                tasks.append(self.sensor_poll_loop())
+            await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             logger.info("Tasks cancelled during shutdown")
         except Exception as e:
@@ -396,7 +405,7 @@ class LapaHubAddon:
                 await self.handle_state_change(event.get("data", {}))
 
     async def handle_state_change(self, data: dict):
-        """Handle a state change event - push to cloud immediately."""
+        """Handle a state change event - push to cloud based on realtime config."""
         import time
         start_time = time.time()
 
@@ -418,7 +427,23 @@ class LapaHubAddon:
             return
 
         new_state_value = new_state.get("state")
-        logger.info(f"[RT] State change: {entity_id} -> {new_state_value}")
+
+        # Realtime filtering based on config:
+        # - Commands (light, switch, cover, climate, fan, lock, media_player): Always realtime
+        # - Binary sensors: Always realtime (security relevant - motion, doors, etc.)
+        # - Sensors: Only realtime if sensor_realtime is True, otherwise polled
+        realtime_domains = [
+            "switch", "light", "climate", "cover", "fan",
+            "lock", "media_player", "scene", "automation",
+            "binary_sensor",  # Always realtime for security
+        ]
+
+        if domain == "sensor" and not self.sensor_realtime:
+            # Skip realtime push for sensors when in polling mode
+            # Just update local cache, sensor_poll_loop will handle cloud sync
+            logger.debug(f"[POLL] Sensor change cached: {entity_id} -> {new_state_value}")
+        else:
+            logger.info(f"[RT] State change: {entity_id} -> {new_state_value}")
 
         # Update local cache
         attributes = new_state.get("attributes", {})
@@ -433,8 +458,9 @@ class LapaHubAddon:
         }
         self.devices[entity_id] = device
 
-        # Push state change to cloud immediately
-        if self.firebase_credentials:
+        # Push state change to cloud (skip sensors in polling mode)
+        should_push_realtime = domain != "sensor" or self.sensor_realtime
+        if self.firebase_credentials and should_push_realtime:
             await self.push_state_change_to_cloud(device, start_time)
 
     async def push_state_change_to_cloud(self, device: dict, start_time: float = None):
@@ -461,6 +487,60 @@ class LapaHubAddon:
         except Exception as e:
             elapsed = (time.time() - start_time) * 1000 if start_time else 0
             logger.warning(f"[RT] Push error for {device['entity_id']}: {e} ({elapsed:.0f}ms)")
+
+    # ==================== Sensor Polling (Beta Mode) ====================
+
+    async def sensor_poll_loop(self):
+        """Poll sensor states and push to cloud at configured interval.
+
+        Only runs when sensor_realtime is False (beta mode).
+        Commands and binary sensors still get realtime updates.
+        """
+        logger.info(f"Starting sensor poll loop (interval: {self.sensor_poll_interval}s)")
+
+        while self.running:
+            try:
+                await self.push_sensor_batch()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Error in sensor poll loop: {e}")
+
+            await asyncio.sleep(self.sensor_poll_interval)
+
+    async def push_sensor_batch(self):
+        """Push all sensor states to cloud as a batch."""
+        if not self.firebase_credentials:
+            return
+
+        # Collect only sensor entities from cache
+        sensors = [
+            device for entity_id, device in self.devices.items()
+            if device.get("domain") == "sensor"
+        ]
+
+        if not sensors:
+            return
+
+        api_url = f"https://us-central1-{self.firebase_project}.cloudfunctions.net/batchUpdateDeviceStates"
+
+        try:
+            async with self.session.post(
+                api_url,
+                json={
+                    "hubId": self.hub_id,
+                    "devices": sensors,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+                headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    logger.info(f"[POLL] Pushed {len(sensors)} sensors to cloud")
+                else:
+                    logger.warning(f"[POLL] Batch push failed: {resp.status}")
+        except Exception as e:
+            logger.warning(f"[POLL] Batch push error: {e}")
 
     # ==================== LAPA-75: Health Heartbeat ====================
 

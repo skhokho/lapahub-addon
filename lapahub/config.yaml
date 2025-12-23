@@ -1,5 +1,5 @@
 name: LapaHub Bridge
-version: "1.0.19"
+version: "1.0.20"
 slug: lapahub
 description: Connect your Home Assistant to LapaHub for smart energy management
 url: https://github.com/skhokho/lapahub-addon
@@ -25,6 +25,8 @@ options:
   api_key: ""
   sync_interval_seconds: 60
   energy_report_interval_seconds: 300
+  sensor_realtime: false
+  sensor_poll_interval_seconds: 30
   log_level: info
 
 schema:
@@ -32,6 +34,8 @@ schema:
   api_key: password
   sync_interval_seconds: int(30,3600)
   energy_report_interval_seconds: int(60,3600)
+  sensor_realtime: bool
+  sensor_poll_interval_seconds: int(10,300)
   log_level: list(debug|info|warning|error)
 
 ports:
