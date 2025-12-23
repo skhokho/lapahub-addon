@@ -1205,7 +1205,7 @@ class LapaHubAddon:
 
                 async function updateStatus() {
                     try {
-                        const resp = await fetch('/api/status');
+                        const resp = await fetch('api/status');
                         const data = await resp.json();
 
                         document.getElementById('device-count').textContent = data.device_count;
@@ -1257,7 +1257,7 @@ class LapaHubAddon:
 
                 async function updateActivity() {
                     try {
-                        const resp = await fetch('/api/activity');
+                        const resp = await fetch('api/activity');
                         const data = await resp.json();
                         const list = document.getElementById('activity-list');
 
@@ -1278,7 +1278,7 @@ class LapaHubAddon:
 
                 async function updateDevices() {
                     try {
-                        const resp = await fetch('/api/devices');
+                        const resp = await fetch('api/devices');
                         const data = await resp.json();
                         const list = document.getElementById('device-list');
 
