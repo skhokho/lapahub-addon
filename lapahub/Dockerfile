@@ -13,11 +13,12 @@ COPY requirements.txt /tmp/
 RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
 
 # Copy application
-COPY rootfs/app /app
+COPY rootfs/ /
 
 # Set permissions
 RUN chmod a+x /app/run.py
 
 WORKDIR /app
 
+# Run the application directly (init: false disables s6-overlay)
 CMD ["python3", "/app/run.py"]

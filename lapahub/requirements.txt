@@ -3,3 +3,4 @@
 # Only additional packages needed here
 
 python-dateutil>=2.8.0
+psutil>=5.9.0

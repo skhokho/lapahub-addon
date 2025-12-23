@@ -1,6 +1,5 @@
 name: LapaHub Bridge
-version: "1.0.15"
-init: false
+version: "1.0.2"
 slug: lapahub
 description: Connect your Home Assistant to LapaHub for smart energy management
 url: https://github.com/skhokho/lapahub-addon
@@ -12,6 +11,7 @@ arch:
   - i386
 startup: application
 boot: auto
+init: false
 hassio_api: true
 homeassistant_api: true
 auth_api: true
