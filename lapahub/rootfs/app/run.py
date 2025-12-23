@@ -33,9 +33,66 @@ logging.basicConfig(
 logger = logging.getLogger("lapahub")
 
 # Configuration
-SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
+SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
+
+
+def get_supervisor_token() -> str | None:
+    """Get supervisor token from environment or file."""
+    # Try environment variable first
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if token:
+        logger.debug("Got SUPERVISOR_TOKEN from environment")
+        return token
+
+    # Try HASSIO_TOKEN (older name)
+    token = os.environ.get("HASSIO_TOKEN")
+    if token:
+        logger.debug("Got HASSIO_TOKEN from environment")
+        return token
+
+    # Try reading from standard supervisor token file
+    if SUPERVISOR_TOKEN_PATH.exists():
+        try:
+            token = SUPERVISOR_TOKEN_PATH.read_text().strip()
+            if token:
+                logger.debug("Got token from /run/supervisor/token")
+                return token
+        except Exception as e:
+            logger.warning(f"Failed to read token file: {e}")
+
+    # Try s6-overlay container environment directory
+    s6_env_path = Path("/run/s6/container_environment/SUPERVISOR_TOKEN")
+    if s6_env_path.exists():
+        try:
+            token = s6_env_path.read_text().strip()
+            if token:
+                logger.debug("Got token from s6 container environment")
+                return token
+        except Exception:
+            pass
+
+    # Try /var/run/s6/container_environment
+    alt_s6_path = Path("/var/run/s6/container_environment/SUPERVISOR_TOKEN")
+    if alt_s6_path.exists():
+        try:
+            token = alt_s6_path.read_text().strip()
+            if token:
+                logger.debug("Got token from /var/run/s6 container environment")
+                return token
+        except Exception:
+            pass
+
+    logger.warning("No supervisor token found - HA API calls will fail")
+    return None
+
+
+SUPERVISOR_TOKEN = get_supervisor_token()
+if SUPERVISOR_TOKEN:
+    logger.info(f"Supervisor token obtained (length: {len(SUPERVISOR_TOKEN)})")
+else:
+    logger.error("No supervisor token - Home Assistant API calls will fail!")
 
 
 class LapaHubAddon:
