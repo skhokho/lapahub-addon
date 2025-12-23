@@ -397,6 +397,9 @@ class LapaHubAddon:
 
     async def handle_state_change(self, data: dict):
         """Handle a state change event - push to cloud immediately."""
+        import time
+        start_time = time.time()
+
         entity_id = data.get("entity_id", "")
         new_state = data.get("new_state")
 
@@ -414,6 +417,9 @@ class LapaHubAddon:
         if domain not in relevant_domains:
             return
 
+        new_state_value = new_state.get("state")
+        logger.info(f"[RT] State change: {entity_id} -> {new_state_value}")
+
         # Update local cache
         attributes = new_state.get("attributes", {})
         device = {
@@ -421,7 +427,7 @@ class LapaHubAddon:
             "domain": domain,
             "friendly_name": attributes.get("friendly_name", entity_id),
             "device_class": attributes.get("device_class"),
-            "state": new_state.get("state"),
+            "state": new_state_value,
             "attributes": attributes,
             "last_updated": new_state.get("last_updated"),
         }
@@ -429,10 +435,11 @@ class LapaHubAddon:
 
         # Push state change to cloud immediately
         if self.firebase_credentials:
-            await self.push_state_change_to_cloud(device)
+            await self.push_state_change_to_cloud(device, start_time)
 
-    async def push_state_change_to_cloud(self, device: dict):
+    async def push_state_change_to_cloud(self, device: dict, start_time: float = None):
         """Push a single device state change to cloud."""
+        import time
         api_url = f"https://us-central1-{self.firebase_project}.cloudfunctions.net/updateDeviceState"
 
         try:
@@ -446,12 +453,14 @@ class LapaHubAddon:
                 headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
+                elapsed = (time.time() - start_time) * 1000 if start_time else 0
                 if resp.status == 200:
-                    logger.debug(f"Pushed state change for {device['entity_id']}")
+                    logger.info(f"[RT] Pushed {device['entity_id']} to cloud ({elapsed:.0f}ms)")
                 else:
-                    logger.debug(f"State push failed: {resp.status}")
+                    logger.warning(f"[RT] Push failed for {device['entity_id']}: {resp.status} ({elapsed:.0f}ms)")
         except Exception as e:
-            logger.debug(f"Could not push state change: {e}")
+            elapsed = (time.time() - start_time) * 1000 if start_time else 0
+            logger.warning(f"[RT] Push error for {device['entity_id']}: {e} ({elapsed:.0f}ms)")
 
     # ==================== LAPA-75: Health Heartbeat ====================
 
