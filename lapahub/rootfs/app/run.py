@@ -36,6 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
+ADDON_VERSION = "1.0.22"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:
@@ -148,12 +149,39 @@ class LapaHubAddon:
         self.scenes: dict = {}
         self.automations: dict = {}
 
+        # Version info for remote tracking
+        self.addon_version = ADDON_VERSION
+        self.ha_version: str | None = None
+
     def _load_options(self) -> dict:
         """Load addon options from config."""
         if OPTIONS_PATH.exists():
             with open(OPTIONS_PATH) as f:
                 return json.load(f)
         return {}
+
+    async def fetch_ha_version(self):
+        """Fetch Home Assistant version from supervisor API."""
+        try:
+            async with self.session.get(
+                "http://supervisor/core/info",
+                headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    self.ha_version = data.get("data", {}).get("version", "unknown")
+                    logger.info(f"Home Assistant version: {self.ha_version}")
+                else:
+                    logger.warning(f"Could not fetch HA version: {resp.status}")
+        except Exception as e:
+            logger.warning(f"Error fetching HA version: {e}")
+
+    @property
+    def version_string(self) -> str:
+        """Get combined version string (addon:HA)."""
+        ha_ver = self.ha_version or "unknown"
+        return f"{self.addon_version}:{ha_ver}"
 
     def log_activity(self, message: str, level: str = "info"):
         """Log activity for web UI display."""
@@ -171,7 +199,7 @@ class LapaHubAddon:
 
     async def start(self):
         """Start the addon."""
-        logger.info("Starting LapaHub Addon v1.0.20")
+        logger.info(f"Starting LapaHub Addon v{self.addon_version}")
         logger.info(f"Realtime mode: commands=always, binary_sensors=always, sensors={'realtime' if self.sensor_realtime else f'polling ({self.sensor_poll_interval}s)'}")
 
         # Set up signal handlers for graceful shutdown
@@ -187,6 +215,9 @@ class LapaHubAddon:
         self.session = aiohttp.ClientSession()
 
         try:
+            # Fetch HA version for remote tracking
+            await self.fetch_ha_version()
+
             # Authenticate with LapaHub cloud (with retries)
             await self.authenticate_with_retry()
 
@@ -577,8 +608,11 @@ class LapaHubAddon:
             "hubId": self.hub_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "status": "online",
+            "firmwareVersion": self.version_string,  # addon:HA format for remote tracking
             "metrics": {
                 "uptime_seconds": int(uptime),
+                "addon_version": self.addon_version,
+                "ha_version": self.ha_version,
                 "device_count": len(self.devices),
                 "scene_count": len(self.scenes),
                 "automation_count": len(self.automations),
@@ -1152,6 +1186,10 @@ class LapaHubAddon:
                             <div class="metric-value" id="memory">-</div>
                         </div>
                         <div class="metric">
+                            <div class="metric-label">Version (Addon:HA)</div>
+                            <div class="metric-value" id="version" style="font-size: 12px;">-</div>
+                        </div>
+                        <div class="metric">
                             <div class="metric-label">Hub ID</div>
                             <div class="metric-value" id="hub-id" style="font-size: 12px;">-</div>
                         </div>
@@ -1211,6 +1249,7 @@ class LapaHubAddon:
                         document.getElementById('device-count').textContent = data.device_count;
                         document.getElementById('scene-count').textContent = data.scene_count || 0;
                         document.getElementById('automation-count').textContent = data.automation_count || 0;
+                        document.getElementById('version').textContent = data.version || '-';
                         document.getElementById('hub-id').textContent = data.hub_id || 'Not configured';
                         document.getElementById('uptime').textContent = formatUptime(data.uptime_seconds || 0);
                         document.getElementById('cpu').textContent = (data.cpu_percent || 0).toFixed(1) + '%';
@@ -1328,6 +1367,9 @@ class LapaHubAddon:
 
         return web.json_response({
             "hub_id": self.hub_id,
+            "version": self.version_string,
+            "addon_version": self.addon_version,
+            "ha_version": self.ha_version,
             "device_count": len(self.devices),
             "scene_count": len(self.scenes),
             "automation_count": len(self.automations),
