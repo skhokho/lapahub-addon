@@ -36,7 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
-ADDON_VERSION = "1.0.24"  # Keep in sync with config.yaml
+ADDON_VERSION = "1.0.25"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:
@@ -1061,10 +1061,20 @@ class LapaHubAddon:
             "dashboard_sources": {},  # Mapped from HA Energy Dashboard
         }
 
+        # Debug: log energy_prefs status
+        logger.info(f"energy_prefs status: exists={self.energy_prefs is not None}, "
+                    f"last_fetch={self.energy_prefs_last_fetch}")
+        if self.energy_prefs:
+            logger.info(f"energy_prefs keys: {list(self.energy_prefs.keys())}")
+
         # If we have Energy Dashboard preferences, use those sensors explicitly
         if self.energy_prefs:
             sources = self.energy_prefs.get("energy_sources", [])
-            logger.debug(f"Processing {len(sources)} energy sources from dashboard config")
+            logger.info(f"Processing {len(sources)} energy sources from dashboard config")
+
+            # Debug: log first few state_lookup keys
+            sample_keys = list(state_lookup.keys())[:10]
+            logger.info(f"Sample state_lookup keys: {sample_keys}")
 
             for source in sources:
                 source_type = source.get("type")
@@ -1076,6 +1086,8 @@ class LapaHubAddon:
                     source.get("stat_compensation")
                 )
 
+                logger.info(f"Energy source: type={source_type}, stat_id={stat_id}, source_keys={list(source.keys())}")
+
                 if not stat_id:
                     continue
 
@@ -1084,14 +1096,19 @@ class LapaHubAddon:
                 # Direct lookup
                 if stat_id in state_lookup:
                     state = state_lookup[stat_id]
+                    logger.info(f"Found {stat_id} via direct lookup")
                 # Try with sensor. prefix
                 elif f"sensor.{stat_id}" in state_lookup:
                     state = state_lookup[f"sensor.{stat_id}"]
+                    logger.info(f"Found {stat_id} via sensor. prefix")
                 # Try stripping recorder: prefix
                 elif stat_id.startswith("recorder:"):
                     clean_id = stat_id.replace("recorder:", "")
                     if clean_id in state_lookup:
                         state = state_lookup[clean_id]
+                        logger.info(f"Found {stat_id} via recorder: strip")
+                else:
+                    logger.warning(f"Could not find {stat_id} in state_lookup")
 
                 if state:
                     try:
