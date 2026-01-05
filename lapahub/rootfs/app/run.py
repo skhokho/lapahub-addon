@@ -36,7 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
-ADDON_VERSION = "1.0.28"  # Keep in sync with config.yaml
+ADDON_VERSION = "1.0.29"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:
@@ -1120,7 +1120,72 @@ class LapaHubAddon:
 
             for source in sources:
                 source_type = source.get("type")
-                # Try multiple stat_id fields
+
+                # Handle grid sources specially - they use flow_from/flow_to/power structure
+                if source_type == "grid":
+                    # Log the full grid source config for debugging
+                    logger.info(f"Grid source config: {json.dumps(source, default=str)}")
+
+                    # Grid has flow_from (import) and flow_to (export) as arrays
+                    # and optionally a direct "power" sensor
+                    power_sensor = source.get("power")
+                    if power_sensor:
+                        logger.info(f"Grid power sensor configured: {power_sensor}")
+                        if power_sensor in state_lookup:
+                            state = state_lookup[power_sensor]
+                            energy_data["dashboard_sources"][power_sensor] = {
+                                "type": "grid",
+                                "value": float(state.get("state", 0)) if state.get("state") not in ("unknown", "unavailable", "") else 0,
+                                "unit": state.get("attributes", {}).get("unit_of_measurement"),
+                                "friendly_name": state.get("attributes", {}).get("friendly_name"),
+                                "is_power_sensor": True,
+                            }
+                            logger.info(f"Found grid power sensor: {power_sensor}")
+
+                    # Process flow_from (grid import) entries
+                    flow_from = source.get("flow_from", [])
+                    for flow in flow_from:
+                        stat_id = flow.get("stat_energy_from")
+                        if stat_id and stat_id in state_lookup:
+                            state = state_lookup[stat_id]
+                            try:
+                                state_value = state.get("state", "")
+                                if state_value not in ("unknown", "unavailable", ""):
+                                    energy_data["dashboard_sources"][stat_id] = {
+                                        "type": "grid",
+                                        "subtype": "import",
+                                        "value": float(state_value),
+                                        "unit": state.get("attributes", {}).get("unit_of_measurement"),
+                                        "friendly_name": state.get("attributes", {}).get("friendly_name"),
+                                    }
+                                    logger.info(f"Found grid import sensor: {stat_id}")
+                            except (ValueError, TypeError):
+                                pass
+
+                    # Process flow_to (grid export) entries
+                    flow_to = source.get("flow_to", [])
+                    for flow in flow_to:
+                        stat_id = flow.get("stat_energy_to")
+                        if stat_id and stat_id in state_lookup:
+                            state = state_lookup[stat_id]
+                            try:
+                                state_value = state.get("state", "")
+                                if state_value not in ("unknown", "unavailable", ""):
+                                    energy_data["dashboard_sources"][stat_id] = {
+                                        "type": "grid",
+                                        "subtype": "export",
+                                        "value": float(state_value),
+                                        "unit": state.get("attributes", {}).get("unit_of_measurement"),
+                                        "friendly_name": state.get("attributes", {}).get("friendly_name"),
+                                    }
+                                    logger.info(f"Found grid export sensor: {stat_id}")
+                            except (ValueError, TypeError):
+                                pass
+
+                    logger.info(f"Energy source: type=grid, power={power_sensor}, flow_from={len(flow_from)}, flow_to={len(flow_to)}")
+                    continue
+
+                # For non-grid sources, try multiple stat_id fields
                 stat_id = (
                     source.get("stat_energy_from") or
                     source.get("stat_energy_to") or
