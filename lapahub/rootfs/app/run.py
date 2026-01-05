@@ -36,7 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
-ADDON_VERSION = "1.0.29"  # Keep in sync with config.yaml
+ADDON_VERSION = "1.0.30"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:
@@ -1127,20 +1127,39 @@ class LapaHubAddon:
                     logger.info(f"Grid source config: {json.dumps(source, default=str)}")
 
                     # Grid has flow_from (import) and flow_to (export) as arrays
-                    # and optionally a direct "power" sensor
-                    power_sensor = source.get("power")
-                    if power_sensor:
-                        logger.info(f"Grid power sensor configured: {power_sensor}")
-                        if power_sensor in state_lookup:
-                            state = state_lookup[power_sensor]
-                            energy_data["dashboard_sources"][power_sensor] = {
-                                "type": "grid",
-                                "value": float(state.get("state", 0)) if state.get("state") not in ("unknown", "unavailable", "") else 0,
-                                "unit": state.get("attributes", {}).get("unit_of_measurement"),
-                                "friendly_name": state.get("attributes", {}).get("friendly_name"),
-                                "is_power_sensor": True,
-                            }
-                            logger.info(f"Found grid power sensor: {power_sensor}")
+                    # and optionally a direct "power" sensor (which is also a list of objects)
+                    power_config = source.get("power")
+                    if power_config:
+                        logger.info(f"Grid power config: {power_config}")
+                        # power is a list of objects with stat_rate field
+                        if isinstance(power_config, list):
+                            for power_item in power_config:
+                                power_sensor = power_item.get("stat_rate") if isinstance(power_item, dict) else None
+                                if power_sensor and power_sensor in state_lookup:
+                                    state = state_lookup[power_sensor]
+                                    state_value = state.get("state", "")
+                                    if state_value not in ("unknown", "unavailable", ""):
+                                        energy_data["dashboard_sources"][power_sensor] = {
+                                            "type": "grid",
+                                            "value": float(state_value),
+                                            "unit": state.get("attributes", {}).get("unit_of_measurement"),
+                                            "friendly_name": state.get("attributes", {}).get("friendly_name"),
+                                            "is_power_sensor": True,
+                                        }
+                                        logger.info(f"Found grid power sensor: {power_sensor} = {state_value}")
+                        elif isinstance(power_config, str) and power_config in state_lookup:
+                            # Handle case where power is a simple string (older format)
+                            state = state_lookup[power_config]
+                            state_value = state.get("state", "")
+                            if state_value not in ("unknown", "unavailable", ""):
+                                energy_data["dashboard_sources"][power_config] = {
+                                    "type": "grid",
+                                    "value": float(state_value),
+                                    "unit": state.get("attributes", {}).get("unit_of_measurement"),
+                                    "friendly_name": state.get("attributes", {}).get("friendly_name"),
+                                    "is_power_sensor": True,
+                                }
+                                logger.info(f"Found grid power sensor: {power_config} = {state_value}")
 
                     # Process flow_from (grid import) entries
                     flow_from = source.get("flow_from", [])
