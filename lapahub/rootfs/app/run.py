@@ -36,7 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
-ADDON_VERSION = "1.0.22"  # Keep in sync with config.yaml
+ADDON_VERSION = "1.0.24"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:
@@ -404,6 +404,9 @@ class LapaHubAddon:
                 if auth_result.get("type") != "auth_ok":
                     raise Exception(f"WebSocket auth failed: {auth_result}")
                 self.log_activity("WebSocket authenticated")
+
+            # Fetch Energy Dashboard preferences on connect
+            await self.fetch_energy_prefs()
 
             # Subscribe to state changes
             self.ws_message_id += 1
