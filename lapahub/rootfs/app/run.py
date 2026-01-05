@@ -36,7 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
-ADDON_VERSION = "1.0.27"  # Keep in sync with config.yaml
+ADDON_VERSION = "1.0.28"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:
@@ -798,17 +798,41 @@ class LapaHubAddon:
             return False
 
     async def fetch_energy_prefs(self):
-        """Fetch Energy Dashboard preferences from Home Assistant via REST API."""
+        """Fetch Energy Dashboard preferences from Home Assistant via WebSocket API."""
         try:
-            url = f"{HA_BASE_URL}/api/energy/prefs"
-            logger.info(f"Fetching Energy Dashboard config from {url}")
-            async with self.session.get(
-                url,
-                headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}"},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status == 200:
-                    self.energy_prefs = await resp.json()
+            # Use WebSocket API to get energy preferences
+            ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
+            logger.info(f"Fetching Energy Dashboard config via WebSocket")
+
+            async with self.session.ws_connect(ws_url) as ws:
+                # Wait for auth_required message
+                msg = await ws.receive_json()
+                if msg.get("type") != "auth_required":
+                    logger.warning(f"Unexpected WS message: {msg}")
+                    return False
+
+                # Send auth
+                await ws.send_json({
+                    "type": "auth",
+                    "access_token": SUPERVISOR_TOKEN,
+                })
+
+                # Wait for auth response
+                msg = await ws.receive_json()
+                if msg.get("type") != "auth_ok":
+                    logger.warning(f"WS auth failed: {msg}")
+                    return False
+
+                # Request energy preferences
+                await ws.send_json({
+                    "id": 1,
+                    "type": "energy/get_prefs",
+                })
+
+                # Wait for response
+                msg = await ws.receive_json()
+                if msg.get("success"):
+                    self.energy_prefs = msg.get("result", {})
                     self.energy_prefs_last_fetch = datetime.now(timezone.utc)
                     sources = self.energy_prefs.get("energy_sources", [])
                     logger.info(f"Loaded Energy Dashboard config with {len(sources)} sources")
@@ -823,9 +847,9 @@ class LapaHubAddon:
                         logger.warning("Energy Dashboard has no sources configured")
                     return True
                 else:
-                    body = await resp.text()
-                    logger.warning(f"Energy prefs API returned {resp.status}: {body[:200]}")
+                    logger.warning(f"Energy prefs request failed: {msg}")
                     return False
+
         except Exception as e:
             logger.warning(f"Could not fetch energy preferences: {e}")
             return False
