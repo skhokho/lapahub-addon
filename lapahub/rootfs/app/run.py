@@ -36,7 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
-ADDON_VERSION = "1.0.26"  # Keep in sync with config.yaml
+ADDON_VERSION = "1.0.27"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:
@@ -800,8 +800,10 @@ class LapaHubAddon:
     async def fetch_energy_prefs(self):
         """Fetch Energy Dashboard preferences from Home Assistant via REST API."""
         try:
+            url = f"{HA_BASE_URL}/api/energy/prefs"
+            logger.info(f"Fetching Energy Dashboard config from {url}")
             async with self.session.get(
-                f"{HA_BASE_URL}/api/energy/prefs",
+                url,
                 headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}"},
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
@@ -816,13 +818,16 @@ class LapaHubAddon:
                         for source in sources[:5]:  # Log first 5
                             source_type = source.get("type", "unknown")
                             stat_id = source.get("stat_energy_from") or source.get("stat_energy_to") or "N/A"
-                            logger.debug(f"  - {source_type}: {stat_id}")
+                            logger.info(f"  Energy source: {source_type} -> {stat_id}")
+                    else:
+                        logger.warning("Energy Dashboard has no sources configured")
                     return True
                 else:
-                    logger.debug(f"Energy prefs API returned {resp.status}")
+                    body = await resp.text()
+                    logger.warning(f"Energy prefs API returned {resp.status}: {body[:200]}")
                     return False
         except Exception as e:
-            logger.debug(f"Could not fetch energy preferences: {e}")
+            logger.warning(f"Could not fetch energy preferences: {e}")
             return False
 
     async def device_sync_loop(self):
