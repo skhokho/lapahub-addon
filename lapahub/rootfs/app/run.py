@@ -149,6 +149,10 @@ class LapaHubAddon:
         self.scenes: dict = {}
         self.automations: dict = {}
 
+        # Energy Dashboard configuration from HA
+        self.energy_prefs: dict | None = None
+        self.energy_prefs_last_fetch: datetime | None = None
+
         # Version info for remote tracking
         self.addon_version = ADDON_VERSION
         self.ha_version: str | None = None
@@ -777,6 +781,34 @@ class LapaHubAddon:
             logger.error(f"Error calling service: {e}")
             return False
 
+    async def fetch_energy_prefs(self):
+        """Fetch Energy Dashboard preferences from Home Assistant via REST API."""
+        try:
+            async with self.session.get(
+                f"{HA_BASE_URL}/api/energy/prefs",
+                headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    self.energy_prefs = await resp.json()
+                    self.energy_prefs_last_fetch = datetime.now(timezone.utc)
+                    sources = self.energy_prefs.get("energy_sources", [])
+                    logger.info(f"Loaded Energy Dashboard config with {len(sources)} sources")
+                    if sources:
+                        self.log_activity(f"Energy Dashboard: {len(sources)} sources configured")
+                        # Log the source types for debugging
+                        for source in sources[:5]:  # Log first 5
+                            source_type = source.get("type", "unknown")
+                            stat_id = source.get("stat_energy_from") or source.get("stat_energy_to") or "N/A"
+                            logger.debug(f"  - {source_type}: {stat_id}")
+                    return True
+                else:
+                    logger.debug(f"Energy prefs API returned {resp.status}")
+                    return False
+        except Exception as e:
+            logger.debug(f"Could not fetch energy preferences: {e}")
+            return False
+
     async def device_sync_loop(self):
         """Periodically sync devices from HA to cloud."""
         logger.info(f"Starting device sync loop (interval: {self.sync_interval}s)")
@@ -996,29 +1028,114 @@ class LapaHubAddon:
             await asyncio.sleep(self.energy_interval)
 
     async def report_energy(self):
-        """Collect and report energy data."""
+        """Collect and report energy data using HA Energy Dashboard config."""
+        # Refresh energy prefs periodically (every 5 minutes or if not loaded)
+        should_refresh = (
+            not self.energy_prefs or
+            not self.energy_prefs_last_fetch or
+            (datetime.now(timezone.utc) - self.energy_prefs_last_fetch) > timedelta(minutes=5)
+        )
+        if should_refresh:
+            await self.fetch_energy_prefs()
+
         states = await self.get_ha_states()
 
         if not states:
             return
 
+        # Build state lookup for fast access - handle both entity_id and stat_id formats
+        state_lookup = {}
+        for s in states:
+            entity_id = s.get("entity_id", "")
+            state_lookup[entity_id] = s
+            # Also index without "sensor." prefix for stat_id matching
+            if entity_id.startswith("sensor."):
+                state_lookup[entity_id[7:]] = s
+
         energy_data = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "sensors": {},
+            "dashboard_sources": {},  # Mapped from HA Energy Dashboard
         }
 
-        # Collect energy-related sensors
-        energy_domains = ["sensor"]
-        energy_classes = [
-            "energy", "power", "voltage", "current",
-            "battery", "power_factor", "frequency",
-        ]
+        # If we have Energy Dashboard preferences, use those sensors explicitly
+        if self.energy_prefs:
+            sources = self.energy_prefs.get("energy_sources", [])
+            logger.debug(f"Processing {len(sources)} energy sources from dashboard config")
+
+            for source in sources:
+                source_type = source.get("type")
+                # Try multiple stat_id fields
+                stat_id = (
+                    source.get("stat_energy_from") or
+                    source.get("stat_energy_to") or
+                    source.get("entity_id") or
+                    source.get("stat_compensation")
+                )
+
+                if not stat_id:
+                    continue
+
+                # Try to find the state - handle various stat_id formats
+                state = None
+                # Direct lookup
+                if stat_id in state_lookup:
+                    state = state_lookup[stat_id]
+                # Try with sensor. prefix
+                elif f"sensor.{stat_id}" in state_lookup:
+                    state = state_lookup[f"sensor.{stat_id}"]
+                # Try stripping recorder: prefix
+                elif stat_id.startswith("recorder:"):
+                    clean_id = stat_id.replace("recorder:", "")
+                    if clean_id in state_lookup:
+                        state = state_lookup[clean_id]
+
+                if state:
+                    try:
+                        state_value = state.get("state", "")
+                        if state_value not in ("unknown", "unavailable", ""):
+                            value = float(state_value)
+                            energy_data["dashboard_sources"][stat_id] = {
+                                "type": source_type,  # solar, grid, battery, gas
+                                "value": value,
+                                "unit": state.get("attributes", {}).get("unit_of_measurement"),
+                                "friendly_name": state.get("attributes", {}).get("friendly_name"),
+                            }
+                    except (ValueError, TypeError) as e:
+                        logger.debug(f"Could not parse {stat_id}: {e}")
+                else:
+                    logger.debug(f"Energy source {stat_id} not found in states")
+
+            # Also check for device consumption sensors
+            device_consumption = self.energy_prefs.get("device_consumption", [])
+            for device in device_consumption:
+                stat_id = device.get("stat_consumption")
+                if stat_id and stat_id in state_lookup:
+                    state = state_lookup[stat_id]
+                    try:
+                        state_value = state.get("state", "")
+                        if state_value not in ("unknown", "unavailable", ""):
+                            value = float(state_value)
+                            energy_data["dashboard_sources"][stat_id] = {
+                                "type": "device",
+                                "value": value,
+                                "unit": state.get("attributes", {}).get("unit_of_measurement"),
+                                "friendly_name": state.get("attributes", {}).get("friendly_name"),
+                            }
+                    except (ValueError, TypeError):
+                        pass
+
+            if energy_data["dashboard_sources"]:
+                logger.info(f"Using {len(energy_data['dashboard_sources'])} Energy Dashboard sources")
+            elif sources:
+                logger.warning(f"Energy Dashboard has {len(sources)} sources but none matched current states")
+
+        # Also collect all energy-related sensors as backup (for pattern matching fallback)
+        energy_classes = ["energy", "power", "voltage", "current", "battery"]
 
         for state in states:
             entity_id = state.get("entity_id", "")
-            domain = entity_id.split(".")[0]
-
-            if domain not in energy_domains:
+            if not entity_id.startswith("sensor."):
                 continue
 
             attributes = state.get("attributes", {})
@@ -1026,19 +1143,22 @@ class LapaHubAddon:
 
             if device_class in energy_classes:
                 try:
-                    value = float(state.get("state", 0))
-                    energy_data["sensors"][entity_id] = {
-                        "value": value,
-                        "unit": attributes.get("unit_of_measurement"),
-                        "device_class": device_class,
-                        "friendly_name": attributes.get("friendly_name"),
-                    }
+                    state_value = state.get("state", "")
+                    if state_value not in ("unknown", "unavailable", ""):
+                        value = float(state_value)
+                        energy_data["sensors"][entity_id] = {
+                            "value": value,
+                            "unit": attributes.get("unit_of_measurement"),
+                            "device_class": device_class,
+                            "friendly_name": attributes.get("friendly_name"),
+                        }
                 except (ValueError, TypeError):
                     pass
 
-        if energy_data["sensors"]:
-            logger.info(f"Collected {len(energy_data['sensors'])} energy readings")
-            await self.push_energy_to_cloud(energy_data)
+        source_count = len(energy_data.get("dashboard_sources", {}))
+        sensor_count = len(energy_data.get("sensors", {}))
+        logger.info(f"Collected {source_count} dashboard sources, {sensor_count} sensors")
+        await self.push_energy_to_cloud(energy_data)
 
     async def push_energy_to_cloud(self, energy_data: dict):
         """Push energy data to LapaHub cloud."""
