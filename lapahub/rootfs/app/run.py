@@ -36,7 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
-ADDON_VERSION = "1.0.25"  # Keep in sync with config.yaml
+ADDON_VERSION = "1.0.26"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:
@@ -416,6 +416,14 @@ class LapaHubAddon:
                 "event_type": "state_changed",
             })
 
+            # Subscribe to HA start event (to refresh energy prefs on HA restart)
+            self.ws_message_id += 1
+            await self.ha_websocket.send_json({
+                "id": self.ws_message_id,
+                "type": "subscribe_events",
+                "event_type": "homeassistant_started",
+            })
+
             # Listen for messages
             async for msg in self.ha_websocket:
                 if msg.type == aiohttp.WSMsgType.TEXT:
@@ -441,6 +449,11 @@ class LapaHubAddon:
 
             if event_type == "state_changed":
                 await self.handle_state_change(event.get("data", {}))
+            elif event_type == "homeassistant_started":
+                # HA restarted - refresh energy dashboard config
+                logger.info("Home Assistant started - refreshing Energy Dashboard config")
+                self.log_activity("HA restarted - refreshing config")
+                await self.fetch_energy_prefs()
 
     async def handle_state_change(self, data: dict):
         """Handle a state change event - push to cloud based on realtime config."""
