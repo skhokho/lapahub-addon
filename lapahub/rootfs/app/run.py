@@ -149,6 +149,11 @@ class LapaHubAddon:
         self.scenes: dict = {}
         self.automations: dict = {}
 
+        # Physical devices from HA device registry (Parent Device Architecture)
+        self.physical_devices: dict = {}
+        # Entity ID → Device ID mapping from entity registry
+        self.entity_device_map: dict = {}
+
         # Energy Dashboard configuration from HA
         self.energy_prefs: dict | None = None
         self.energy_prefs_last_fetch: datetime | None = None
@@ -773,6 +778,69 @@ class LapaHubAddon:
             logger.error(f"Error getting HA states: {e}")
             return []
 
+    async def fetch_device_registry(self) -> list:
+        """Fetch HA device registry with manufacturer, model info.
+
+        Returns list of physical devices with:
+        - id: HA device_id
+        - name: Device name
+        - manufacturer: e.g., "Sungrow", "Philips"
+        - model: e.g., "SH25T", "Hue Bridge"
+        - sw_version: Firmware version
+        - hw_version: Hardware version
+        - serial_number: Device serial
+        - via_device_id: Parent device (for nested devices)
+        """
+        headers = {"Authorization": f"Bearer {SUPERVISOR_TOKEN}"}
+
+        try:
+            async with self.session.get(
+                f"{HA_BASE_URL}/api/config/device_registry",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    devices = await resp.json()
+                    logger.info(f"Fetched {len(devices)} physical devices from HA device registry")
+                    return devices
+                else:
+                    logger.error(f"Failed to get HA device registry: {resp.status}")
+                    return []
+        except Exception as e:
+            logger.error(f"Error getting HA device registry: {e}")
+            return []
+
+    async def fetch_entity_registry(self) -> dict:
+        """Fetch HA entity registry to get entity_id → device_id mapping.
+
+        Returns dict mapping entity_id to device_id.
+        """
+        headers = {"Authorization": f"Bearer {SUPERVISOR_TOKEN}"}
+
+        try:
+            async with self.session.get(
+                f"{HA_BASE_URL}/api/config/entity_registry",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    entities = await resp.json()
+                    # Build entity_id → device_id mapping
+                    entity_device_map = {}
+                    for entity in entities:
+                        entity_id = entity.get("entity_id")
+                        device_id = entity.get("device_id")
+                        if entity_id and device_id:
+                            entity_device_map[entity_id] = device_id
+                    logger.info(f"Fetched entity registry: {len(entity_device_map)} entities with device_id")
+                    return entity_device_map
+                else:
+                    logger.error(f"Failed to get HA entity registry: {resp.status}")
+                    return {}
+        except Exception as e:
+            logger.error(f"Error getting HA entity registry: {e}")
+            return {}
+
     async def call_ha_service(self, domain: str, service: str, data: dict) -> bool:
         """Call a Home Assistant service."""
         headers = {
@@ -861,6 +929,9 @@ class LapaHubAddon:
 
         while self.running:
             try:
+                # Sync physical devices first (from device registry)
+                await self.sync_physical_devices()
+                # Then sync entities (with parent device references)
                 await self.sync_devices()
                 self.last_device_sync = datetime.now(timezone.utc)
                 consecutive_errors = 0  # Reset on success
@@ -879,6 +950,82 @@ class LapaHubAddon:
 
             await asyncio.sleep(self.sync_interval)
 
+    async def sync_physical_devices(self):
+        """Sync physical devices from HA device registry to cloud.
+
+        Physical devices represent actual hardware (inverters, bridges, etc.)
+        that contain multiple entities (sensors, switches).
+        Also fetches entity registry to build entity→device mapping.
+        """
+        registry = await self.fetch_device_registry()
+
+        if not registry:
+            return
+
+        # Fetch entity registry to get entity_id → device_id mapping
+        self.entity_device_map = await self.fetch_entity_registry()
+
+        # Build physical devices list with relevant info
+        physical_devices = []
+        for device in registry:
+            device_id = device.get("id")
+            if not device_id:
+                continue
+
+            # Skip devices without useful identifying info
+            name = device.get("name_by_user") or device.get("name") or ""
+            manufacturer = device.get("manufacturer") or ""
+            model = device.get("model") or ""
+
+            # Skip if no name, manufacturer, or model
+            if not name and not manufacturer and not model:
+                continue
+
+            physical_device = {
+                "id": device_id,
+                "name": name,
+                "manufacturer": manufacturer,
+                "model": model,
+                "sw_version": device.get("sw_version"),
+                "hw_version": device.get("hw_version"),
+                "serial_number": device.get("serial_number"),
+                "via_device_id": device.get("via_device_id"),
+                "config_entries": device.get("config_entries", []),
+                "identifiers": device.get("identifiers", []),
+                "connections": device.get("connections", []),
+            }
+            physical_devices.append(physical_device)
+            self.physical_devices[device_id] = physical_device
+
+        logger.info(f"Synced {len(physical_devices)} physical devices from registry")
+        await self.push_physical_devices_to_cloud(physical_devices)
+
+    async def push_physical_devices_to_cloud(self, devices: list):
+        """Push physical devices list to LapaHub cloud."""
+        if not self.firebase_credentials:
+            logger.debug("Skipping physical device push (no credentials)")
+            return
+
+        api_url = f"https://us-central1-{self.firebase_project}.cloudfunctions.net/syncPhysicalDevices"
+
+        try:
+            async with self.session.post(
+                api_url,
+                json={
+                    "hubId": self.hub_id,
+                    "devices": devices,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+                headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as resp:
+                if resp.status == 200:
+                    logger.debug(f"Pushed {len(devices)} physical devices to cloud")
+                else:
+                    logger.warning(f"Physical device push failed: {resp.status}")
+        except Exception as e:
+            logger.warning(f"Could not push physical devices to cloud: {e}")
+
     async def sync_devices(self):
         """Sync all devices from Home Assistant to LapaHub cloud."""
         states = await self.get_ha_states()
@@ -893,6 +1040,7 @@ class LapaHubAddon:
         ]
 
         devices = []
+        entities_with_parent = 0
         for state in states:
             entity_id = state.get("entity_id", "")
             domain = entity_id.split(".")[0] if "." in entity_id else ""
@@ -902,6 +1050,15 @@ class LapaHubAddon:
 
             attributes = state.get("attributes", {})
 
+            # Get device_id from entity registry mapping (populated during sync_physical_devices)
+            device_id = self.entity_device_map.get(entity_id)
+
+            # Get parent device info if we have it cached
+            parent_device_name = None
+            if device_id and device_id in self.physical_devices:
+                parent_device = self.physical_devices[device_id]
+                parent_device_name = parent_device.get("name")
+
             device = {
                 "entity_id": entity_id,
                 "domain": domain,
@@ -910,11 +1067,17 @@ class LapaHubAddon:
                 "state": state.get("state"),
                 "attributes": attributes,
                 "last_updated": state.get("last_updated"),
+                # Parent device linkage (new fields for hierarchical view)
+                "parent_device_id": device_id,
+                "parent_device_name": parent_device_name,
             }
             devices.append(device)
 
+            if device_id:
+                entities_with_parent += 1
+
         self.devices = {d["entity_id"]: d for d in devices}
-        logger.info(f"Synced {len(devices)} devices from Home Assistant")
+        logger.info(f"Synced {len(devices)} entities ({entities_with_parent} with parent device)")
 
         # Send to cloud
         await self.push_devices_to_cloud(devices)
