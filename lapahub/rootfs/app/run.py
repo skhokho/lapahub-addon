@@ -779,7 +779,7 @@ class LapaHubAddon:
             return []
 
     async def fetch_device_registry(self) -> list:
-        """Fetch HA device registry with manufacturer, model info.
+        """Fetch HA device registry with manufacturer, model info via WebSocket.
 
         Returns list of physical devices with:
         - id: HA device_id
@@ -791,40 +791,89 @@ class LapaHubAddon:
         - serial_number: Device serial
         - via_device_id: Parent device (for nested devices)
         """
-        headers = {"Authorization": f"Bearer {SUPERVISOR_TOKEN}"}
-
         try:
-            async with self.session.get(
-                f"{HA_BASE_URL}/api/config/device_registry",
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status == 200:
-                    devices = await resp.json()
+            # Device registry is only accessible via WebSocket, not REST API
+            ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
+            logger.info("Fetching device registry via WebSocket")
+
+            async with self.session.ws_connect(ws_url) as ws:
+                # Wait for auth_required message
+                msg = await ws.receive_json()
+                if msg.get("type") != "auth_required":
+                    logger.warning(f"Unexpected WS message: {msg}")
+                    return []
+
+                # Send auth
+                await ws.send_json({
+                    "type": "auth",
+                    "access_token": SUPERVISOR_TOKEN,
+                })
+
+                # Wait for auth response
+                msg = await ws.receive_json()
+                if msg.get("type") != "auth_ok":
+                    logger.warning(f"WS auth failed: {msg}")
+                    return []
+
+                # Request device registry list
+                await ws.send_json({
+                    "id": 1,
+                    "type": "config/device_registry/list",
+                })
+
+                # Wait for response
+                msg = await ws.receive_json()
+                if msg.get("success"):
+                    devices = msg.get("result", [])
                     logger.info(f"Fetched {len(devices)} physical devices from HA device registry")
                     return devices
                 else:
-                    logger.error(f"Failed to get HA device registry: {resp.status}")
+                    logger.error(f"Device registry request failed: {msg}")
                     return []
+
         except Exception as e:
             logger.error(f"Error getting HA device registry: {e}")
             return []
 
     async def fetch_entity_registry(self) -> dict:
-        """Fetch HA entity registry to get entity_id → device_id mapping.
+        """Fetch HA entity registry to get entity_id → device_id mapping via WebSocket.
 
         Returns dict mapping entity_id to device_id.
         """
-        headers = {"Authorization": f"Bearer {SUPERVISOR_TOKEN}"}
-
         try:
-            async with self.session.get(
-                f"{HA_BASE_URL}/api/config/entity_registry",
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status == 200:
-                    entities = await resp.json()
+            # Entity registry is only accessible via WebSocket, not REST API
+            ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
+            logger.info("Fetching entity registry via WebSocket")
+
+            async with self.session.ws_connect(ws_url) as ws:
+                # Wait for auth_required message
+                msg = await ws.receive_json()
+                if msg.get("type") != "auth_required":
+                    logger.warning(f"Unexpected WS message: {msg}")
+                    return {}
+
+                # Send auth
+                await ws.send_json({
+                    "type": "auth",
+                    "access_token": SUPERVISOR_TOKEN,
+                })
+
+                # Wait for auth response
+                msg = await ws.receive_json()
+                if msg.get("type") != "auth_ok":
+                    logger.warning(f"WS auth failed: {msg}")
+                    return {}
+
+                # Request entity registry list
+                await ws.send_json({
+                    "id": 1,
+                    "type": "config/entity_registry/list",
+                })
+
+                # Wait for response
+                msg = await ws.receive_json()
+                if msg.get("success"):
+                    entities = msg.get("result", [])
                     # Build entity_id → device_id mapping
                     entity_device_map = {}
                     for entity in entities:
@@ -835,8 +884,9 @@ class LapaHubAddon:
                     logger.info(f"Fetched entity registry: {len(entity_device_map)} entities with device_id")
                     return entity_device_map
                 else:
-                    logger.error(f"Failed to get HA entity registry: {resp.status}")
+                    logger.error(f"Entity registry request failed: {msg}")
                     return {}
+
         except Exception as e:
             logger.error(f"Error getting HA entity registry: {e}")
             return {}
