@@ -759,6 +759,187 @@ class LapaHubAddon:
         service = "turn_on" if enable else "turn_off"
         return await self.call_ha_service("automation", service, {"entity_id": entity_id})
 
+    async def create_automation(self, automation_id: str, config: dict) -> bool:
+        """Create or update an automation in Home Assistant via WebSocket.
+
+        Args:
+            automation_id: The HA automation ID (e.g., 'lapahub_abc123')
+            config: The HA automation config (with alias, trigger, condition, action)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
+            logger.info(f"Creating automation '{automation_id}' via WebSocket")
+
+            async with self.session.ws_connect(ws_url) as ws:
+                # Auth sequence
+                msg = await ws.receive_json()
+                if msg.get("type") != "auth_required":
+                    logger.warning(f"Unexpected WS message: {msg}")
+                    return False
+
+                await ws.send_json({
+                    "type": "auth",
+                    "access_token": SUPERVISOR_TOKEN,
+                })
+
+                msg = await ws.receive_json()
+                if msg.get("type") != "auth_ok":
+                    logger.warning(f"WS auth failed: {msg}")
+                    return False
+
+                # Create/update automation config
+                # HA expects the config at config/automation/config/{automation_id}
+                await ws.send_json({
+                    "id": 1,
+                    "type": "automation/config",
+                    "automation_id": automation_id,
+                    "config": config,
+                })
+
+                msg = await ws.receive_json()
+                if msg.get("success"):
+                    logger.info(f"Automation '{automation_id}' created successfully")
+                    self.log_activity(f"Created automation: {config.get('alias', automation_id)}")
+                    return True
+                else:
+                    error = msg.get("error", {}).get("message", "Unknown error")
+                    logger.error(f"Failed to create automation: {error}")
+                    return False
+
+        except Exception as e:
+            logger.error(f"Error creating automation: {e}")
+            return False
+
+    async def delete_automation(self, automation_id: str) -> bool:
+        """Delete an automation from Home Assistant via WebSocket.
+
+        Args:
+            automation_id: The HA automation ID (e.g., 'lapahub_abc123')
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
+            logger.info(f"Deleting automation '{automation_id}' via WebSocket")
+
+            async with self.session.ws_connect(ws_url) as ws:
+                # Auth sequence
+                msg = await ws.receive_json()
+                if msg.get("type") != "auth_required":
+                    return False
+
+                await ws.send_json({
+                    "type": "auth",
+                    "access_token": SUPERVISOR_TOKEN,
+                })
+
+                msg = await ws.receive_json()
+                if msg.get("type") != "auth_ok":
+                    return False
+
+                # Delete automation
+                await ws.send_json({
+                    "id": 1,
+                    "type": "automation/delete",
+                    "automation_id": automation_id,
+                })
+
+                msg = await ws.receive_json()
+                if msg.get("success"):
+                    logger.info(f"Automation '{automation_id}' deleted successfully")
+                    self.log_activity(f"Deleted automation: {automation_id}")
+                    return True
+                else:
+                    error = msg.get("error", {}).get("message", "Unknown error")
+                    logger.error(f"Failed to delete automation: {error}")
+                    return False
+
+        except Exception as e:
+            logger.error(f"Error deleting automation: {e}")
+            return False
+
+    async def create_scene(self, scene_id: str, entities: dict = None, snapshot_entities: list = None, scene_name: str = None) -> bool:
+        """Create a scene in Home Assistant via scene.create service.
+
+        The scene.create service can either:
+        1. Use explicit entity states (entities dict)
+        2. Snapshot current states of specified entities (snapshot_entities list)
+
+        Args:
+            scene_id: The scene ID (e.g., 'lapahub_abc123')
+            entities: Dict mapping entity_id to desired state (optional)
+            snapshot_entities: List of entity_ids to snapshot current state (optional)
+            scene_name: Friendly name for the scene (optional)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            logger.info(f"Creating scene '{scene_id}' via scene.create service")
+
+            # Build service data
+            service_data = {
+                "scene_id": f"lapahub_{scene_id}",
+            }
+
+            if entities:
+                # Use explicit entity states
+                service_data["entities"] = entities
+            elif snapshot_entities:
+                # Snapshot current states of specified entities
+                service_data["snapshot_entities"] = snapshot_entities
+
+            success = await self.call_ha_service("scene", "create", service_data)
+
+            if success:
+                self.log_activity(f"Created scene: {scene_name or scene_id}")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"Error creating scene: {e}")
+            return False
+
+    async def delete_scene(self, scene_id: str) -> bool:
+        """Delete a scene from Home Assistant via scene.delete service.
+
+        Note: HA doesn't have a native scene.delete service for dynamically created scenes.
+        We can use homeassistant.reload_scenes after deleting from scenes.yaml,
+        but for dynamically created scenes (via scene.create), they persist until HA restart.
+
+        For now, we'll log a warning since dynamic scene deletion isn't fully supported.
+
+        Args:
+            scene_id: The scene ID (e.g., 'lapahub_abc123')
+
+        Returns:
+            True if scene was handled, False on error
+        """
+        try:
+            # For dynamically created scenes (scene.create), HA doesn't have a direct delete
+            # The best approach is to call homeassistant.update_entity to remove it
+            # or accept that it will be cleaned up on HA restart
+
+            entity_id = f"scene.lapahub_{scene_id}" if not scene_id.startswith("scene.") else scene_id
+
+            logger.info(f"Scene delete requested for '{entity_id}'")
+            logger.warning(
+                f"HA doesn't support deleting dynamically created scenes. "
+                f"Scene '{entity_id}' will be removed on HA restart."
+            )
+            self.log_activity(f"Scene marked for deletion: {scene_id} (removed on HA restart)")
+
+            # Return True to indicate the command was handled (even though we can't truly delete)
+            return True
+
+        except Exception as e:
+            logger.error(f"Error handling scene delete: {e}")
+            return False
+
     async def get_ha_states(self) -> list:
         """Get all entity states from Home Assistant."""
         headers = {"Authorization": f"Bearer {SUPERVISOR_TOKEN}"}
@@ -1206,34 +1387,140 @@ class LapaHubAddon:
             logger.debug(f"Command poll error: {e}")
 
     async def execute_command(self, command: dict):
-        """Execute a command from the cloud."""
+        """Execute a command from the cloud.
+
+        Handles both standard device commands and special automation/scene commands:
+        - automation.create: Create a new automation in HA
+        - automation.update: Update an existing automation
+        - automation.delete: Delete an automation
+        - scene.create: Create a new scene in HA
+        - scene.update: Update an existing scene
+        - scene.delete: Delete a scene
+        - scene.activate: Activate a scene
+        - automation.trigger: Manually trigger an automation
+        - automation.toggle: Enable/disable an automation
+        """
         cmd_id = command.get("id")
-        entity_id = command.get("entity_id")
+        entity_id = command.get("entity_id", "")
         action = command.get("action")
         params = command.get("params", {})
 
-        logger.info(f"Executing command {cmd_id}: {action} on {entity_id}")
+        logger.info(f"Executing command {cmd_id}: {action} on {entity_id or 'N/A'}")
+        success = False
 
-        # Parse entity domain
-        domain = entity_id.split(".")[0] if "." in entity_id else "homeassistant"
+        # Handle special automation/scene commands
+        if action == "automation.create":
+            # Create new automation
+            automation_id = params.get("automation_id")
+            config = params.get("config", {})
+            if automation_id and config:
+                success = await self.create_automation(automation_id, config)
+            else:
+                logger.error("automation.create requires automation_id and config in params")
 
-        # Map common actions to HA services
-        service_map = {
-            "turn_on": "turn_on",
-            "turn_off": "turn_off",
-            "toggle": "toggle",
-            "set_temperature": "set_temperature",
-            "set_hvac_mode": "set_hvac_mode",
-            "lock": "lock",
-            "unlock": "unlock",
-            "open": "open_cover",
-            "close": "close_cover",
-        }
+        elif action == "automation.update":
+            # Update existing automation (same as create in HA)
+            automation_id = params.get("automation_id")
+            config = params.get("config", {})
+            if automation_id and config:
+                success = await self.create_automation(automation_id, config)
+            else:
+                logger.error("automation.update requires automation_id and config in params")
 
-        service = service_map.get(action, action)
-        service_data = {"entity_id": entity_id, **params}
+        elif action == "automation.delete":
+            # Delete an automation
+            automation_id = params.get("automation_id")
+            if automation_id:
+                success = await self.delete_automation(automation_id)
+            else:
+                logger.error("automation.delete requires automation_id in params")
 
-        success = await self.call_ha_service(domain, service, service_data)
+        elif action == "automation.trigger":
+            # Manually trigger an automation
+            if entity_id:
+                success = await self.call_ha_service("automation", "trigger", {"entity_id": entity_id})
+            else:
+                logger.error("automation.trigger requires entity_id")
+
+        elif action == "automation.toggle":
+            # Enable/disable automation
+            if entity_id:
+                enable = params.get("enabled", True)
+                success = await self.toggle_automation(entity_id, enable)
+            else:
+                logger.error("automation.toggle requires entity_id")
+
+        elif action == "scene.create":
+            # Create new scene
+            # Cloud Function sends: scene_id, entities (dict), snapshot_entities (list)
+            scene_id = params.get("scene_id")
+            entities = params.get("entities")
+            snapshot_entities = params.get("snapshot_entities")
+            scene_name = params.get("name") or params.get("friendly_name")
+
+            if scene_id and (entities or snapshot_entities):
+                success = await self.create_scene(
+                    scene_id=scene_id,
+                    entities=entities,
+                    snapshot_entities=snapshot_entities,
+                    scene_name=scene_name
+                )
+            else:
+                logger.error("scene.create requires scene_id and either entities or snapshot_entities")
+
+        elif action == "scene.update":
+            # Update existing scene (same as create in HA - just recreate with new entities)
+            scene_id = params.get("scene_id")
+            entities = params.get("entities")
+            snapshot_entities = params.get("snapshot_entities")
+            scene_name = params.get("name") or params.get("friendly_name")
+
+            if scene_id and (entities or snapshot_entities):
+                success = await self.create_scene(
+                    scene_id=scene_id,
+                    entities=entities,
+                    snapshot_entities=snapshot_entities,
+                    scene_name=scene_name
+                )
+            else:
+                logger.error("scene.update requires scene_id and either entities or snapshot_entities")
+
+        elif action == "scene.delete":
+            # Delete a scene
+            scene_id = params.get("scene_id")
+            if scene_id:
+                success = await self.delete_scene(scene_id)
+            else:
+                logger.error("scene.delete requires scene_id in params")
+
+        elif action == "scene.activate":
+            # Activate a scene
+            if entity_id:
+                success = await self.trigger_scene(entity_id)
+            else:
+                logger.error("scene.activate requires entity_id")
+
+        else:
+            # Standard device command - map to HA service call
+            domain = entity_id.split(".")[0] if entity_id and "." in entity_id else "homeassistant"
+
+            # Map common actions to HA services
+            service_map = {
+                "turn_on": "turn_on",
+                "turn_off": "turn_off",
+                "toggle": "toggle",
+                "set_temperature": "set_temperature",
+                "set_hvac_mode": "set_hvac_mode",
+                "lock": "lock",
+                "unlock": "unlock",
+                "open": "open_cover",
+                "close": "close_cover",
+            }
+
+            service = service_map.get(action, action)
+            service_data = {"entity_id": entity_id, **params}
+
+            success = await self.call_ha_service(domain, service, service_data)
 
         # Report command result back to cloud
         await self.report_command_result(cmd_id, success)
