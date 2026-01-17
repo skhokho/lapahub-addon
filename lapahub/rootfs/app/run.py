@@ -36,7 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
-ADDON_VERSION = "1.0.39"  # Keep in sync with config.yaml
+ADDON_VERSION = "1.0.40"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:
@@ -767,11 +767,16 @@ class LapaHubAddon:
                         if msg_id == 1:
                             logger.info(f"First automation config response: {str(response)[:500]}")
                         if response.get("success") and response.get("result"):
-                            config = response["result"]
+                            # Config is nested under result.config
+                            config = response["result"].get("config", response["result"])
                             # Convert HA config format to LapaHub format
-                            automation["triggers"] = self.convert_ha_triggers(config.get("trigger", []))
-                            automation["conditions"] = self.convert_ha_conditions(config.get("condition", []))
-                            automation["actions"] = self.convert_ha_actions(config.get("action", []))
+                            # HA uses plural keys: triggers, conditions, actions (or singular for older format)
+                            triggers = config.get("triggers") or config.get("trigger", [])
+                            conditions = config.get("conditions") or config.get("condition", [])
+                            actions = config.get("actions") or config.get("action", [])
+                            automation["triggers"] = self.convert_ha_triggers(triggers)
+                            automation["conditions"] = self.convert_ha_conditions(conditions)
+                            automation["actions"] = self.convert_ha_actions(actions)
                             automation["description"] = config.get("description", "")
                         elif not response.get("success"):
                             error = response.get("error", {})
