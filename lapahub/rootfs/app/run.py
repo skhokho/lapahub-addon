@@ -712,7 +712,7 @@ class LapaHubAddon:
             elif domain == "automation":
                 automation = {
                     "entity_id": entity_id,
-                    "name": attributes.get("friendly_name", entity_id),
+                    "friendly_name": attributes.get("friendly_name", entity_id),
                     "state": state.get("state"),  # on/off
                     "last_triggered": attributes.get("last_triggered"),
                     "mode": attributes.get("mode"),
@@ -720,9 +720,234 @@ class LapaHubAddon:
                 automations.append(automation)
                 self.automations[entity_id] = automation
 
+        # Fetch full automation configs (triggers, conditions, actions)
+        if automations:
+            automations = await self.enrich_automation_configs(automations)
+
         if scenes or automations:
             self.log_activity(f"Synced {len(scenes)} scenes, {len(automations)} automations")
             await self.push_scenes_to_cloud(scenes, automations)
+
+    async def enrich_automation_configs(self, automations: list) -> list:
+        """Fetch full automation configs from HA via WebSocket API."""
+        try:
+            ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
+
+            async with self.session.ws_connect(ws_url) as ws:
+                # Auth sequence
+                msg = await ws.receive_json()
+                if msg.get("type") != "auth_required":
+                    return automations
+
+                await ws.send_json({
+                    "type": "auth",
+                    "access_token": SUPERVISOR_TOKEN,
+                })
+
+                auth_result = await ws.receive_json()
+                if auth_result.get("type") != "auth_ok":
+                    logger.warning("WebSocket auth failed for automation config fetch")
+                    return automations
+
+                # Fetch config for each automation
+                msg_id = 1
+                for automation in automations:
+                    entity_id = automation.get("entity_id", "")
+                    # Extract automation ID from entity_id (e.g., "automation.morning_routine" -> "morning_routine")
+                    automation_id = entity_id.replace("automation.", "") if entity_id.startswith("automation.") else entity_id
+
+                    await ws.send_json({
+                        "id": msg_id,
+                        "type": "automation/config",
+                        "entity_id": entity_id,
+                    })
+
+                    try:
+                        response = await asyncio.wait_for(ws.receive_json(), timeout=5)
+                        if response.get("success") and response.get("result"):
+                            config = response["result"]
+                            # Convert HA config format to LapaHub format
+                            automation["triggers"] = self.convert_ha_triggers(config.get("trigger", []))
+                            automation["conditions"] = self.convert_ha_conditions(config.get("condition", []))
+                            automation["actions"] = self.convert_ha_actions(config.get("action", []))
+                            automation["description"] = config.get("description", "")
+                            logger.debug(f"Fetched config for {entity_id}")
+                    except asyncio.TimeoutError:
+                        logger.debug(f"Timeout fetching config for {entity_id}")
+                    except Exception as e:
+                        logger.debug(f"Error fetching config for {entity_id}: {e}")
+
+                    msg_id += 1
+
+        except Exception as e:
+            logger.warning(f"Could not fetch automation configs: {e}")
+
+        return automations
+
+    def convert_ha_triggers(self, ha_triggers: list) -> list:
+        """Convert HA trigger format to LapaHub format."""
+        triggers = []
+        for i, t in enumerate(ha_triggers if isinstance(ha_triggers, list) else [ha_triggers]):
+            if not isinstance(t, dict):
+                continue
+            platform = t.get("platform", "")
+            trigger = {
+                "id": f"trigger_{i+1}",
+                "type": self.map_trigger_platform(platform),
+            }
+
+            if platform == "state":
+                trigger["entity_id"] = t.get("entity_id")
+                trigger["from"] = t.get("from")
+                trigger["to"] = t.get("to")
+                if t.get("for"):
+                    trigger["for"] = self.duration_to_seconds(t["for"])
+                if t.get("attribute"):
+                    trigger["attribute"] = t["attribute"]
+                    trigger["type"] = "deviceAttribute"
+            elif platform == "time":
+                trigger["at"] = t.get("at")
+            elif platform == "time_pattern":
+                trigger["type"] = "timePattern"
+                if t.get("hours") and t.get("minutes"):
+                    trigger["at"] = f"{t['hours']}:{t['minutes']}"
+            elif platform == "sun":
+                trigger["event"] = t.get("event", "sunrise")
+                if t.get("offset"):
+                    trigger["offset"] = self.duration_to_seconds(t["offset"])
+            elif platform == "numeric_state":
+                trigger["entity_id"] = t.get("entity_id")
+                trigger["above"] = t.get("above")
+                trigger["below"] = t.get("below")
+
+            triggers.append(trigger)
+        return triggers
+
+    def convert_ha_conditions(self, ha_conditions: list) -> list:
+        """Convert HA condition format to LapaHub format."""
+        conditions = []
+        for i, c in enumerate(ha_conditions if isinstance(ha_conditions, list) else [ha_conditions]):
+            if not isinstance(c, dict):
+                continue
+            cond_type = c.get("condition", "")
+            condition = {
+                "id": f"condition_{i+1}",
+                "type": self.map_condition_type(cond_type),
+            }
+
+            if cond_type == "state":
+                condition["entity_id"] = c.get("entity_id")
+                condition["state"] = c.get("state")
+                if c.get("attribute"):
+                    condition["attribute"] = c["attribute"]
+                    condition["attribute_value"] = c.get("state")
+            elif cond_type == "numeric_state":
+                condition["entity_id"] = c.get("entity_id")
+                if c.get("above") is not None:
+                    condition["comparison"] = "above"
+                    condition["value"] = c["above"]
+                elif c.get("below") is not None:
+                    condition["comparison"] = "below"
+                    condition["value"] = c["below"]
+            elif cond_type == "time":
+                condition["after"] = c.get("after")
+                condition["before"] = c.get("before")
+                if c.get("weekday"):
+                    condition["type"] = "dayOfWeek"
+                    condition["weekdays"] = self.convert_weekdays(c["weekday"])
+            elif cond_type == "sun":
+                if c.get("after"):
+                    condition["after_sun"] = c["after"]
+                if c.get("before"):
+                    condition["before_sun"] = c["before"]
+
+            conditions.append(condition)
+        return conditions
+
+    def convert_ha_actions(self, ha_actions: list) -> list:
+        """Convert HA action format to LapaHub format."""
+        actions = []
+        for i, a in enumerate(ha_actions if isinstance(ha_actions, list) else [ha_actions]):
+            if not isinstance(a, dict):
+                continue
+
+            action = {"id": f"action_{i+1}"}
+
+            if "service" in a:
+                service = a["service"]
+                parts = service.split(".", 1)
+                action["type"] = "deviceService"
+                action["domain"] = parts[0] if len(parts) > 1 else service
+                action["service"] = parts[1] if len(parts) > 1 else service
+
+                # Handle target entity
+                target = a.get("target", {})
+                entity_id = target.get("entity_id") or a.get("entity_id")
+                if isinstance(entity_id, list):
+                    entity_id = entity_id[0] if entity_id else None
+                action["entity_id"] = entity_id
+
+                # Service data
+                if a.get("data"):
+                    action["service_data"] = a["data"]
+
+            elif "delay" in a:
+                action["type"] = "delay"
+                action["delay"] = self.duration_to_seconds(a["delay"])
+            elif "scene" in a:
+                action["type"] = "scene"
+                action["scene_id"] = a["scene"]
+
+            actions.append(action)
+        return actions
+
+    def map_trigger_platform(self, platform: str) -> str:
+        """Map HA trigger platform to LapaHub trigger type."""
+        mapping = {
+            "state": "deviceState",
+            "time": "time",
+            "time_pattern": "timePattern",
+            "sun": "sun",
+            "numeric_state": "numericState",
+            "event": "manual",
+        }
+        return mapping.get(platform, "manual")
+
+    def map_condition_type(self, cond_type: str) -> str:
+        """Map HA condition type to LapaHub condition type."""
+        mapping = {
+            "state": "deviceState",
+            "numeric_state": "numericState",
+            "time": "time",
+            "sun": "sun",
+            "zone": "zone",
+            "template": "template",
+        }
+        return mapping.get(cond_type, "deviceState")
+
+    def convert_weekdays(self, weekdays: list) -> list:
+        """Convert HA weekday names to numbers (1=Mon, 7=Sun)."""
+        day_map = {"mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun": 7}
+        return [day_map.get(d.lower(), 1) for d in weekdays if isinstance(d, str)]
+
+    def duration_to_seconds(self, duration) -> int:
+        """Convert HA duration format to seconds."""
+        if isinstance(duration, (int, float)):
+            return int(duration)
+        if isinstance(duration, str):
+            # Parse HH:MM:SS format
+            parts = duration.split(":")
+            if len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            elif len(parts) == 2:
+                return int(parts[0]) * 60 + int(parts[1])
+        if isinstance(duration, dict):
+            return (
+                duration.get("hours", 0) * 3600 +
+                duration.get("minutes", 0) * 60 +
+                duration.get("seconds", 0)
+            )
+        return 0
 
     async def push_scenes_to_cloud(self, scenes: list, automations: list):
         """Push scenes and automations to LapaHub cloud."""
