@@ -36,7 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
-ADDON_VERSION = "1.0.38"  # Keep in sync with config.yaml
+ADDON_VERSION = "1.0.39"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:
@@ -755,13 +755,10 @@ class LapaHubAddon:
                 errors = []
                 for automation in automations:
                     entity_id = automation.get("entity_id", "")
-                    # Extract automation ID from entity_id (e.g., "automation.morning_routine" -> "morning_routine")
-                    automation_id = entity_id.replace("automation.", "") if entity_id.startswith("automation.") else entity_id
-
                     await ws.send_json({
                         "id": msg_id,
                         "type": "automation/config",
-                        "automation_id": automation_id,
+                        "entity_id": entity_id,
                     })
 
                     try:
@@ -778,11 +775,11 @@ class LapaHubAddon:
                             automation["description"] = config.get("description", "")
                         elif not response.get("success"):
                             error = response.get("error", {})
-                            errors.append(f"{automation_id}: {error.get('code', 'unknown')} - {error.get('message', 'no message')}")
+                            errors.append(f"{entity_id}: {error.get('code', 'unknown')} - {error.get('message', 'no message')}")
                     except asyncio.TimeoutError:
-                        errors.append(f"{automation_id}: timeout")
+                        errors.append(f"{entity_id}: timeout")
                     except Exception as e:
-                        errors.append(f"{automation_id}: {e}")
+                        errors.append(f"{entity_id}: {e}")
 
                     msg_id += 1
 
