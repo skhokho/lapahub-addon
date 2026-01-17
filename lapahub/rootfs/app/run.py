@@ -36,7 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
-ADDON_VERSION = "1.0.35"  # Keep in sync with config.yaml
+ADDON_VERSION = "1.0.36"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:
@@ -730,8 +730,9 @@ class LapaHubAddon:
 
     async def enrich_automation_configs(self, automations: list) -> list:
         """Fetch full automation configs from HA via WebSocket API."""
+        logger.info(f"Fetching automation configs for {len(automations)} automations")
         try:
-            ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
+            ws_url = "ws://supervisor/core/websocket"
 
             async with self.session.ws_connect(ws_url) as ws:
                 # Auth sequence
@@ -778,6 +779,10 @@ class LapaHubAddon:
                         logger.debug(f"Error fetching config for {entity_id}: {e}")
 
                     msg_id += 1
+
+                # Count how many automations have triggers
+                enriched = sum(1 for a in automations if a.get("triggers"))
+                logger.info(f"Enriched {enriched}/{len(automations)} automations with config data")
 
         except Exception as e:
             logger.warning(f"Could not fetch automation configs: {e}")
