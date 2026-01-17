@@ -36,7 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
-ADDON_VERSION = "1.0.37"  # Keep in sync with config.yaml
+ADDON_VERSION = "1.0.38"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:
@@ -766,6 +766,9 @@ class LapaHubAddon:
 
                     try:
                         response = await asyncio.wait_for(ws.receive_json(), timeout=5)
+                        # Log first response for debugging
+                        if msg_id == 1:
+                            logger.info(f"First automation config response: {str(response)[:500]}")
                         if response.get("success") and response.get("result"):
                             config = response["result"]
                             # Convert HA config format to LapaHub format
@@ -783,9 +786,12 @@ class LapaHubAddon:
 
                     msg_id += 1
 
-                if errors and len(errors) <= 5:
-                    for err in errors:
-                        logger.warning(f"Automation config error: {err}")
+                # Log errors summary
+                if errors:
+                    logger.warning(f"Automation config errors: {len(errors)} failures")
+                    # Log first few errors for debugging
+                    for err in errors[:3]:
+                        logger.warning(f"  - {err}")
 
                 # Count how many automations have triggers
                 enriched = sum(1 for a in automations if a.get("triggers"))
