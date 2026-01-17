@@ -36,7 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
-ADDON_VERSION = "1.0.34"  # Keep in sync with config.yaml
+ADDON_VERSION = "1.0.35"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:

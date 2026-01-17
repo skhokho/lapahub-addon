@@ -1,5 +1,5 @@
 name: LapaHub Bridge
-version: "1.0.34"
+version: "1.0.35"
 slug: lapahub
 description: Connect your Home Assistant to LapaHub for smart energy management
 url: https://github.com/skhokho/lapahub-addon
