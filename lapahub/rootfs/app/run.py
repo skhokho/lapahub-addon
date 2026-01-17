@@ -36,7 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
-ADDON_VERSION = "1.0.40"  # Keep in sync with config.yaml
+ADDON_VERSION = "1.0.41"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:
@@ -810,13 +810,26 @@ class LapaHubAddon:
         for i, t in enumerate(ha_triggers if isinstance(ha_triggers, list) else [ha_triggers]):
             if not isinstance(t, dict):
                 continue
-            platform = t.get("platform", "")
+            # HA 2024+ uses 'trigger' key, older uses 'platform'
+            platform = t.get("platform") or t.get("trigger", "")
+            trigger_type = t.get("type", "")  # For device triggers, this is the action type
+
             trigger = {
                 "id": f"trigger_{i+1}",
                 "type": self.map_trigger_platform(platform),
             }
 
-            if platform == "state":
+            if platform == "device":
+                # Device triggers: e.g., switch turned on/off, light turned on/off
+                trigger["type"] = "deviceState"
+                trigger["device_id"] = t.get("device_id")
+                trigger["domain"] = t.get("domain")
+                trigger["trigger_type"] = trigger_type  # e.g., "turned_on", "turned_off"
+                # Build a friendly description
+                action_desc = trigger_type.replace("_", " ") if trigger_type else "changed"
+                domain = t.get("domain", "device")
+                trigger["description"] = f"{domain.title()} {action_desc}"
+            elif platform == "state":
                 trigger["entity_id"] = t.get("entity_id")
                 trigger["from"] = t.get("from")
                 trigger["to"] = t.get("to")
@@ -829,7 +842,7 @@ class LapaHubAddon:
                 trigger["at"] = t.get("at")
             elif platform == "time_pattern":
                 trigger["type"] = "timePattern"
-                if t.get("hours") and t.get("minutes"):
+                if t.get("hours") is not None and t.get("minutes") is not None:
                     trigger["at"] = f"{t['hours']}:{t['minutes']}"
             elif platform == "sun":
                 trigger["event"] = t.get("event", "sunrise")
@@ -893,21 +906,28 @@ class LapaHubAddon:
 
             action = {"id": f"action_{i+1}"}
 
-            if "service" in a:
-                service = a["service"]
+            # HA 2024+ uses 'action' key, older uses 'service'
+            service = a.get("service") or a.get("action")
+            if service:
                 parts = service.split(".", 1)
                 action["type"] = "deviceService"
                 action["domain"] = parts[0] if len(parts) > 1 else service
                 action["service"] = parts[1] if len(parts) > 1 else service
 
-                # Handle target entity
+                # Handle target entity - check multiple locations
                 target = a.get("target", {})
                 entity_id = target.get("entity_id") or a.get("entity_id")
+                device_id = target.get("device_id") or a.get("device_id")
+
                 if isinstance(entity_id, list):
                     entity_id = entity_id[0] if entity_id else None
-                action["entity_id"] = entity_id
+                if isinstance(device_id, list):
+                    device_id = device_id[0] if device_id else None
 
-                # Service data
+                action["entity_id"] = entity_id
+                action["device_id"] = device_id
+
+                # Service data - check both 'data' and 'metadata'
                 if a.get("data"):
                     action["service_data"] = a["data"]
 
@@ -917,6 +937,16 @@ class LapaHubAddon:
             elif "scene" in a:
                 action["type"] = "scene"
                 action["scene_id"] = a["scene"]
+            elif a.get("type") == "device":
+                # Device action format (HA 2024+)
+                action["type"] = "deviceAction"
+                action["device_id"] = a.get("device_id")
+                action["domain"] = a.get("domain")
+                action["action_type"] = a.get("type")
+                # Build a friendly description
+                action_type = a.get("type", "control")
+                domain = a.get("domain", "device")
+                action["description"] = f"{action_type.replace('_', ' ').title()} {domain}"
 
             actions.append(action)
         return actions
@@ -925,6 +955,7 @@ class LapaHubAddon:
         """Map HA trigger platform to LapaHub trigger type."""
         mapping = {
             "state": "deviceState",
+            "device": "deviceState",
             "time": "time",
             "time_pattern": "timePattern",
             "sun": "sun",
