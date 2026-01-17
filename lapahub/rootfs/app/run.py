@@ -36,7 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
-ADDON_VERSION = "1.0.36"  # Keep in sync with config.yaml
+ADDON_VERSION = "1.0.37"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:
@@ -752,6 +752,7 @@ class LapaHubAddon:
 
                 # Fetch config for each automation
                 msg_id = 1
+                errors = []
                 for automation in automations:
                     entity_id = automation.get("entity_id", "")
                     # Extract automation ID from entity_id (e.g., "automation.morning_routine" -> "morning_routine")
@@ -760,7 +761,7 @@ class LapaHubAddon:
                     await ws.send_json({
                         "id": msg_id,
                         "type": "automation/config",
-                        "entity_id": entity_id,
+                        "automation_id": automation_id,
                     })
 
                     try:
@@ -772,13 +773,19 @@ class LapaHubAddon:
                             automation["conditions"] = self.convert_ha_conditions(config.get("condition", []))
                             automation["actions"] = self.convert_ha_actions(config.get("action", []))
                             automation["description"] = config.get("description", "")
-                            logger.debug(f"Fetched config for {entity_id}")
+                        elif not response.get("success"):
+                            error = response.get("error", {})
+                            errors.append(f"{automation_id}: {error.get('code', 'unknown')} - {error.get('message', 'no message')}")
                     except asyncio.TimeoutError:
-                        logger.debug(f"Timeout fetching config for {entity_id}")
+                        errors.append(f"{automation_id}: timeout")
                     except Exception as e:
-                        logger.debug(f"Error fetching config for {entity_id}: {e}")
+                        errors.append(f"{automation_id}: {e}")
 
                     msg_id += 1
+
+                if errors and len(errors) <= 5:
+                    for err in errors:
+                        logger.warning(f"Automation config error: {err}")
 
                 # Count how many automations have triggers
                 enriched = sum(1 for a in automations if a.get("triggers"))
