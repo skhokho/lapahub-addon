@@ -1899,6 +1899,7 @@ class LapaHubAddon:
 
                 # Handle grid sources specially - they use flow_from/flow_to/power structure
                 if source_type == "grid":
+                    power_sensor = None  # Initialize before use
                     # Log the full grid source config for debugging
                     logger.info(f"Grid source config: {json.dumps(source, default=str)}")
 
