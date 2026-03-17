@@ -1457,6 +1457,30 @@ class LapaHubAddon:
 
             await asyncio.sleep(self.sync_interval)
 
+    async def fetch_area_registry(self) -> dict:
+        """Fetch HA area registry via WebSocket. Returns {area_id: area_name} lookup."""
+        try:
+            ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
+            async with self.session.ws_connect(ws_url) as ws:
+                msg = await ws.receive_json()
+                if msg.get("type") != "auth_required":
+                    return {}
+                await ws.send_json({"type": "auth", "access_token": SUPERVISOR_TOKEN})
+                msg = await ws.receive_json()
+                if msg.get("type") != "auth_ok":
+                    return {}
+                await ws.send_json({"id": 1, "type": "config/area_registry/list"})
+                msg = await ws.receive_json()
+                if msg.get("success"):
+                    areas = msg.get("result", [])
+                    lookup = {a["area_id"]: a.get("name", a["area_id"]) for a in areas}
+                    logger.info(f"Fetched {len(lookup)} areas from HA area registry")
+                    return lookup
+                return {}
+        except Exception as e:
+            logger.warning(f"Could not fetch area registry: {e}")
+            return {}
+
     async def sync_physical_devices(self):
         """Sync physical devices from HA device registry to cloud.
 
@@ -1471,6 +1495,9 @@ class LapaHubAddon:
 
         # Fetch entity registry to get entity_id → device_id mapping
         self.entity_device_map = await self.fetch_entity_registry()
+
+        # Fetch area registry to resolve area_id → area_name
+        self.area_lookup = await self.fetch_area_registry()
 
         # Build physical devices list with relevant info
         physical_devices = []
@@ -1500,6 +1527,8 @@ class LapaHubAddon:
                 "config_entries": device.get("config_entries", []),
                 "identifiers": device.get("identifiers", []),
                 "connections": device.get("connections", []),
+                "area_id": device.get("area_id"),
+                "area_name": self.area_lookup.get(device.get("area_id", ""), ""),
             }
             physical_devices.append(physical_device)
             self.physical_devices[device_id] = physical_device
@@ -1562,9 +1591,11 @@ class LapaHubAddon:
 
             # Get parent device info if we have it cached
             parent_device_name = None
+            area_id = None
             if device_id and device_id in self.physical_devices:
                 parent_device = self.physical_devices[device_id]
                 parent_device_name = parent_device.get("name")
+                area_id = parent_device.get("area_id")
 
             device = {
                 "entity_id": entity_id,
@@ -1577,6 +1608,9 @@ class LapaHubAddon:
                 # Parent device linkage (new fields for hierarchical view)
                 "parent_device_id": device_id,
                 "parent_device_name": parent_device_name,
+                # HA area for room auto-creation
+                "area_id": area_id,
+                "area_name": self.area_lookup.get(area_id or "", "") if hasattr(self, 'area_lookup') else "",
             }
             devices.append(device)
 
