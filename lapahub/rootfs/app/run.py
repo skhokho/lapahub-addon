@@ -36,7 +36,7 @@ logger = logging.getLogger("lapahub")
 HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
-ADDON_VERSION = "1.0.41"  # Keep in sync with config.yaml
+ADDON_VERSION = "1.0.44"  # Keep in sync with config.yaml
 
 
 def get_supervisor_token() -> str | None:
@@ -188,9 +188,8 @@ class LapaHubAddon:
 
     @property
     def version_string(self) -> str:
-        """Get combined version string (addon:HA)."""
-        ha_ver = self.ha_version or "unknown"
-        return f"{self.addon_version}:{ha_ver}"
+        """Get version string for display."""
+        return f"v{self.addon_version}"
 
     def log_activity(self, message: str, level: str = "info"):
         """Log activity for web UI display."""
