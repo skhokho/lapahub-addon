@@ -37,22 +37,25 @@ HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
 def _read_addon_version() -> str:
-    """Read version from config.yaml — single source of truth."""
-    config_paths = [
-        Path("/etc/lapahub/config.yaml"),   # Standard addon config location
-        Path("/config.yaml"),                # Root of addon container
-        Path(__file__).parent.parent.parent.parent / "config.yaml",  # Relative to run.py
-    ]
-    for path in config_paths:
-        if path.exists():
-            try:
-                with open(path) as f:
-                    for line in f:
-                        if line.strip().startswith("version:"):
-                            return line.split(":", 1)[1].strip().strip('"').strip("'")
-            except Exception:
-                pass
-    return "unknown"
+    """Read addon version from HA Supervisor API or fallback."""
+    import urllib.request
+    # HA Supervisor provides addon info via its API
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if token:
+        try:
+            req = urllib.request.Request(
+                "http://supervisor/addons/self/info",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                import json
+                data = json.loads(resp.read())
+                version = data.get("data", {}).get("version")
+                if version:
+                    return version
+        except Exception:
+            pass
+    return "1.0.45"  # Fallback — update when bumping config.yaml
 
 ADDON_VERSION = _read_addon_version()
 
