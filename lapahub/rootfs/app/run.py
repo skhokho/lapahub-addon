@@ -37,10 +37,20 @@ HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
 def _read_addon_version() -> str:
-    """Read addon version from HA Supervisor API or fallback."""
+    """Read addon version from HA Supervisor API."""
     import urllib.request
-    # HA Supervisor provides addon info via its API
+    # Try env var first, then token file
     token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token:
+        try:
+            token = Path("/run/supervisor/token").read_text().strip()
+        except Exception:
+            pass
+    if not token:
+        try:
+            token = Path("/run/os/supervisor/token").read_text().strip()
+        except Exception:
+            pass
     if token:
         try:
             req = urllib.request.Request(
@@ -53,9 +63,9 @@ def _read_addon_version() -> str:
                 version = data.get("data", {}).get("version")
                 if version:
                     return version
-        except Exception:
-            pass
-    return "1.0.45"  # Fallback — update when bumping config.yaml
+        except Exception as e:
+            logger.warning(f"Could not read version from Supervisor API: {e}")
+    return "1.0.46"  # Fallback — update when bumping config.yaml
 
 ADDON_VERSION = _read_addon_version()
 
