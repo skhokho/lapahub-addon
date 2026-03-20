@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.48
+
+- SSE streaming for instant command delivery (<200ms vs 1-5s polling)
+- Persistent connection to Cloud Functions v2 — zero polling overhead
+- Automatic fallback to classic poll if SSE endpoint unavailable
+- Heartbeat keep-alive with dead-connection detection
+
+## 1.0.47
+
+- Rooms auto-creation from HA area registry
+- Area ID and area name sent with device sync payloads
+
 ## 1.0.46
 
 - Read addon version from HA Supervisor API — single source of truth

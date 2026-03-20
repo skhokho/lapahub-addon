@@ -1681,51 +1681,140 @@ class LapaHubAddon:
             logger.warning(f"Could not push to cloud: {e}")
 
     async def command_listener_loop(self):
-        """Listen for commands from LapaHub cloud."""
-        logger.info("Starting command listener loop")
+        """Listen for commands via Server-Sent Events (SSE) streaming.
+
+        Opens a persistent HTTP connection to the waitForCommands v2 Cloud
+        Function. The server pushes command events in real-time via SSE.
+        Commands arrive in <200ms — no polling, no wasted cycles.
+
+        Falls back to classic getPendingCommands poll if the SSE endpoint
+        is unavailable (e.g. not yet deployed).
+        """
+        logger.info("Starting command listener (SSE streaming mode)")
         consecutive_errors = 0
+        use_sse = True
 
         while self.running:
             try:
-                await self.poll_commands()
-                consecutive_errors = 0  # Reset on success
+                if use_sse:
+                    await self._stream_commands_sse()
+                else:
+                    await self._poll_commands_classic()
+                    await asyncio.sleep(2)
+                # If _stream_commands_sse returns normally, reconnect immediately
+                consecutive_errors = 0
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 consecutive_errors += 1
-                if consecutive_errors <= 3:  # Only log first few errors
-                    logger.error(f"Error polling commands: {e}")
+                if consecutive_errors <= 3:
+                    logger.error(f"Error in command listener: {e}")
 
-                # If too many consecutive errors, try to re-authenticate
-                if consecutive_errors >= 5:
-                    self.log_activity("Too many command poll errors, attempting re-authentication", "warning")
-                    await self.authenticate_with_retry()
+                if consecutive_errors >= 3 and use_sse:
+                    logger.warning("SSE stream failing, falling back to classic poll")
+                    use_sse = False
                     consecutive_errors = 0
 
-            await asyncio.sleep(5)  # Poll every 5 seconds
+                if consecutive_errors >= 5:
+                    self.log_activity("Too many command errors, re-authenticating", "warning")
+                    await self.authenticate_with_retry()
+                    use_sse = True
+                    consecutive_errors = 0
 
-    async def poll_commands(self):
-        """Poll for pending commands from cloud."""
+                await asyncio.sleep(1)
+
+    async def _stream_commands_sse(self):
+        """Open persistent SSE connection to receive commands in real-time."""
+        if not self.firebase_credentials:
+            await asyncio.sleep(5)
+            return
+
+        api_url = f"https://us-central1-{self.firebase_project}.cloudfunctions.net/waitForCommands"
+
+        async with self.session.get(
+            api_url,
+            params={"hubId": self.hub_id},
+            headers={
+                "Authorization": f"Bearer {self.firebase_credentials.get('token', '')}",
+                "Accept": "text/event-stream",
+            },
+            timeout=aiohttp.ClientTimeout(
+                total=130,     # Server timeout is 120s, add margin
+                sock_read=45,  # Heartbeat every 15s, so 45s without data = dead
+            ),
+        ) as resp:
+            if resp.status == 401:
+                raise Exception("Unauthorized — token may have expired")
+            if resp.status != 200:
+                raise Exception(f"waitForCommands returned {resp.status}")
+
+            logger.info("SSE command stream connected")
+            self.log_activity("Command stream connected (SSE)")
+
+            # Parse SSE events from the response stream
+            event_type = None
+            data_lines = []
+
+            async for line_bytes in resp.content:
+                if not self.running:
+                    break
+
+                line = line_bytes.decode("utf-8").rstrip("\n").rstrip("\r")
+
+                if line.startswith("event: "):
+                    event_type = line[7:]
+                elif line.startswith("data: "):
+                    data_lines.append(line[6:])
+                elif line == "":
+                    # Empty line = end of event
+                    if event_type and data_lines:
+                        data_str = "\n".join(data_lines)
+                        await self._handle_sse_event(event_type, data_str)
+                    event_type = None
+                    data_lines = []
+
+            logger.info("SSE stream ended, will reconnect")
+
+    async def _handle_sse_event(self, event_type: str, data_str: str):
+        """Process a single SSE event from the command stream."""
+        if event_type == "commands":
+            try:
+                payload = json.loads(data_str)
+                commands = payload.get("commands", [])
+                if commands:
+                    logger.info(f"SSE: received {len(commands)} command(s)")
+                    for cmd in commands:
+                        await self.execute_command(cmd)
+            except json.JSONDecodeError as e:
+                logger.warning(f"SSE: invalid JSON in commands event: {e}")
+        elif event_type == "connected":
+            logger.debug("SSE: connected event received")
+        elif event_type == "heartbeat":
+            pass  # Keep-alive, no action needed
+        elif event_type == "error":
+            logger.warning(f"SSE: server error: {data_str}")
+            raise Exception(f"SSE server error: {data_str}")
+        else:
+            logger.debug(f"SSE: unknown event type '{event_type}'")
+
+    async def _poll_commands_classic(self):
+        """Classic poll fallback — single GET for pending commands."""
         if not self.firebase_credentials:
             return
 
         api_url = f"https://us-central1-{self.firebase_project}.cloudfunctions.net/getPendingCommands"
 
-        try:
-            async with self.session.get(
-                api_url,
-                params={"hubId": self.hub_id},
-                headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    commands = data.get("commands", [])
-
-                    for cmd in commands:
-                        await self.execute_command(cmd)
-        except Exception as e:
-            logger.debug(f"Command poll error: {e}")
+        async with self.session.get(
+            api_url,
+            params={"hubId": self.hub_id},
+            headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                commands = data.get("commands", [])
+                for cmd in commands:
+                    await self.execute_command(cmd)
 
     async def execute_command(self, command: dict):
         """Execute a command from the cloud.
