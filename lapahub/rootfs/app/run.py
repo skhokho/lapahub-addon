@@ -1751,13 +1751,14 @@ class LapaHubAddon:
             logger.info("SSE command stream connected")
             self.log_activity("Command stream connected (SSE)")
 
-            # Parse SSE events from the response stream
+            # Parse SSE events line-by-line from the response stream
             event_type = None
             data_lines = []
 
-            async for line_bytes in resp.content:
-                if not self.running:
-                    break
+            while self.running:
+                line_bytes = await resp.content.readline()
+                if not line_bytes:
+                    break  # Stream closed
 
                 line = line_bytes.decode("utf-8").rstrip("\n").rstrip("\r")
 
@@ -1766,7 +1767,7 @@ class LapaHubAddon:
                 elif line.startswith("data: "):
                     data_lines.append(line[6:])
                 elif line == "":
-                    # Empty line = end of event
+                    # Empty line = end of SSE event
                     if event_type and data_lines:
                         data_str = "\n".join(data_lines)
                         await self._handle_sse_event(event_type, data_str)

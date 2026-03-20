@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.49
+
+- Fix SSE stream parsing — use readline() instead of chunk iteration
+- Commands were not being received because aiohttp chunk reader doesn't split on newlines
+
 ## 1.0.48
 
 - SSE streaming for instant command delivery (<200ms vs 1-5s polling)
