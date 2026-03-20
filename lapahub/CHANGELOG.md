@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.50
+
+- Revert to 1-second polling for reliable command delivery
+- SSE streaming needs further debugging — commands not reaching addon via SSE
+- 1s poll provides ~2-3s round-trip which is acceptable for now
+
 ## 1.0.49
 
 - Fix SSE stream parsing — use readline() instead of chunk iteration

@@ -1681,47 +1681,30 @@ class LapaHubAddon:
             logger.warning(f"Could not push to cloud: {e}")
 
     async def command_listener_loop(self):
-        """Listen for commands via Server-Sent Events (SSE) streaming.
+        """Listen for commands from LapaHub cloud.
 
-        Opens a persistent HTTP connection to the waitForCommands v2 Cloud
-        Function. The server pushes command events in real-time via SSE.
-        Commands arrive in <200ms — no polling, no wasted cycles.
-
-        Falls back to classic getPendingCommands poll if the SSE endpoint
-        is unavailable (e.g. not yet deployed).
+        Polls getPendingCommands every second for responsive device control.
         """
-        logger.info("Starting command listener (SSE streaming mode)")
+        logger.info("Starting command listener (1s poll)")
         consecutive_errors = 0
-        use_sse = True
 
         while self.running:
             try:
-                if use_sse:
-                    await self._stream_commands_sse()
-                else:
-                    await self._poll_commands_classic()
-                    await asyncio.sleep(2)
-                # If _stream_commands_sse returns normally, reconnect immediately
+                await self._poll_commands_classic()
                 consecutive_errors = 0
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 consecutive_errors += 1
                 if consecutive_errors <= 3:
-                    logger.error(f"Error in command listener: {e}")
-
-                if consecutive_errors >= 3 and use_sse:
-                    logger.warning("SSE stream failing, falling back to classic poll")
-                    use_sse = False
-                    consecutive_errors = 0
+                    logger.error(f"Error polling commands: {e}")
 
                 if consecutive_errors >= 5:
                     self.log_activity("Too many command errors, re-authenticating", "warning")
                     await self.authenticate_with_retry()
-                    use_sse = True
                     consecutive_errors = 0
 
-                await asyncio.sleep(1)
+            await asyncio.sleep(1)
 
     async def _stream_commands_sse(self):
         """Open persistent SSE connection to receive commands in real-time."""
