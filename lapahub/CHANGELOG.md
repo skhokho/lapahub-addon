@@ -1,10 +1,16 @@
 # Changelog
 
+## 1.0.51
+
+- Long-poll command delivery — addon holds connection open for 25s
+- Commands arrive in <500ms instead of 1-2s polling delay
+- Automatic fallback to 1s classic poll if long-poll unavailable
+
 ## 1.0.50
 
 - Revert to 1-second polling for reliable command delivery
-- SSE streaming needs further debugging — commands not reaching addon via SSE
-- 1s poll provides ~2-3s round-trip which is acceptable for now
+- SSE streaming not supported in Cloud Functions v1 (response buffering)
+- 1s poll provides ~2-3s round-trip
 
 ## 1.0.49
 
