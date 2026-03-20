@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.52
+
+- SSE streaming with Cloud Functions v2 — sub-second command delivery
+- Persistent connection, zero polling overhead
+- Automatic fallback to 1s classic poll if SSE unavailable
+- Heartbeat keep-alive with dead-connection detection
+
 ## 1.0.51
 
 - Long-poll command delivery — addon holds connection open for 25s

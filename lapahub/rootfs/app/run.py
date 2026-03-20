@@ -1681,25 +1681,26 @@ class LapaHubAddon:
             logger.warning(f"Could not push to cloud: {e}")
 
     async def command_listener_loop(self):
-        """Listen for commands via long-poll (push-based).
+        """Listen for commands via SSE streaming (Cloud Functions v2).
 
-        Calls waitForCommands which holds the connection open for up to 25s.
-        Returns instantly when commands arrive, or empty after 25s timeout.
-        The addon loops immediately — no sleep, no wasted cycles.
+        Opens a persistent HTTP connection to the waitForCommands endpoint.
+        The server pushes command events in real-time via Server-Sent Events.
+        Commands arrive in <500ms — no polling, no wasted cycles.
 
-        Falls back to classic 1s poll if long-poll endpoint unavailable.
+        Falls back to classic 1s poll if SSE endpoint unavailable.
         """
-        logger.info("Starting command listener (long-poll mode)")
+        logger.info("Starting command listener (SSE streaming mode)")
         consecutive_errors = 0
-        use_long_poll = True
+        use_sse = True
 
         while self.running:
             try:
-                if use_long_poll:
-                    await self._long_poll_commands()
+                if use_sse:
+                    await self._stream_commands_sse()
                 else:
                     await self._poll_commands_classic()
                     await asyncio.sleep(1)
+                # SSE returns normally when stream ends — reconnect immediately
                 consecutive_errors = 0
             except asyncio.CancelledError:
                 raise
@@ -1708,42 +1709,18 @@ class LapaHubAddon:
                 if consecutive_errors <= 3:
                     logger.error(f"Error in command listener: {e}")
 
-                if consecutive_errors >= 3 and use_long_poll:
-                    logger.warning("Long-poll failing, falling back to classic 1s poll")
-                    use_long_poll = False
+                if consecutive_errors >= 3 and use_sse:
+                    logger.warning("SSE failing, falling back to classic 1s poll")
+                    use_sse = False
                     consecutive_errors = 0
 
                 if consecutive_errors >= 5:
                     self.log_activity("Too many command errors, re-authenticating", "warning")
                     await self.authenticate_with_retry()
-                    use_long_poll = True
+                    use_sse = True
                     consecutive_errors = 0
 
                 await asyncio.sleep(1)
-
-    async def _long_poll_commands(self):
-        """Hold connection open until commands arrive or 25s timeout."""
-        if not self.firebase_credentials:
-            await asyncio.sleep(5)
-            return
-
-        api_url = f"https://us-central1-{self.firebase_project}.cloudfunctions.net/waitForCommands"
-
-        async with self.session.get(
-            api_url,
-            params={"hubId": self.hub_id, "timeout": "25000"},
-            headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
-            timeout=aiohttp.ClientTimeout(total=35),
-        ) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                commands = data.get("commands", [])
-                for cmd in commands:
-                    await self.execute_command(cmd)
-            elif resp.status == 401:
-                raise Exception("Unauthorized — token may have expired")
-            else:
-                raise Exception(f"waitForCommands returned {resp.status}")
 
     async def _stream_commands_sse(self):
         """Open persistent SSE connection to receive commands in real-time."""
