@@ -85,7 +85,7 @@ def _read_addon_version() -> str:
     except Exception as e:
         logger.warning(f"Could not read version from config.yaml: {e}")
 
-    return "1.0.52"  # Last resort fallback — keep in sync with config.yaml
+    return "1.0.53"  # Last resort fallback — keep in sync with config.yaml
 
 ADDON_VERSION = _read_addon_version()
 
