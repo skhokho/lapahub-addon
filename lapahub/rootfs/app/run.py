@@ -37,9 +37,10 @@ HA_BASE_URL = "http://supervisor/core"
 OPTIONS_PATH = Path("/data/options.json")
 SUPERVISOR_TOKEN_PATH = Path("/run/supervisor/token")
 def _read_addon_version() -> str:
-    """Read addon version from HA Supervisor API."""
+    """Read addon version from HA Supervisor API, falling back to config.yaml."""
     import urllib.request
-    # Try env var first, then token file
+
+    # Method 1: Supervisor API (most accurate — reflects installed version)
     token = os.environ.get("SUPERVISOR_TOKEN")
     if not token:
         try:
@@ -65,7 +66,26 @@ def _read_addon_version() -> str:
                     return version
         except Exception as e:
             logger.warning(f"Could not read version from Supervisor API: {e}")
-    return "1.0.46"  # Fallback — update when bumping config.yaml
+
+    # Method 2: Read from config.yaml (always in sync with deployed version)
+    try:
+        import yaml
+        config_paths = [
+            Path("/config.yaml"),           # Inside addon container
+            Path("/data/config.yaml"),
+            Path(__file__).parent.parent.parent / "config.yaml",  # Relative to rootfs/app/
+        ]
+        for config_path in config_paths:
+            if config_path.exists():
+                with open(config_path) as f:
+                    config = yaml.safe_load(f)
+                    version = config.get("version")
+                    if version:
+                        return str(version)
+    except Exception as e:
+        logger.warning(f"Could not read version from config.yaml: {e}")
+
+    return "1.0.52"  # Last resort fallback — keep in sync with config.yaml
 
 ADDON_VERSION = _read_addon_version()
 
