@@ -14,7 +14,7 @@ class CommandJournal:
     A crash between the recorded claim and completion has an unknown outcome.
     It must never cause a blind replay of a potentially non-idempotent HA action.
     """
-    def __init__(self, path, capacity=10000):
+    def __init__(self, path, capacity=50000):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, timeout=1)
         self.db.execute('PRAGMA journal_mode=WAL')
@@ -98,7 +98,12 @@ class StatePublisher:
             del self.pending[entity]
             self.active.add(entity)
             try:
-                await self.publish(device, observed_at)
+                result = await self.publish(device, observed_at)
+                if result is False:
+                    # Retry current state only; never replace a newer queued event.
+                    if entity not in self.pending:
+                        self.offer(device, observed_at)
+                    await asyncio.sleep(1)
             finally:
                 self.active.remove(entity)
                 if self.pending:

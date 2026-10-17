@@ -99,6 +99,25 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         finally:
             for worker in workers: worker.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
+    async def test_failed_publication_retries_latest_state(self):
+        sent, completed = [], asyncio.Event()
+        async def publish(device, observed):
+            sent.append(device['state'])
+            if len(sent) == 1:
+                publisher.offer({'entity_id': 'office', 'state': 'off'}, 2)
+                return False
+            completed.set()
+            return True
+        publisher = StatePublisher(publish)
+        with patch('asyncio.sleep', new=AsyncMock()):
+            worker = asyncio.create_task(publisher.worker())
+            try:
+                publisher.offer({'entity_id': 'office', 'state': 'on'}, 1)
+                await asyncio.wait_for(completed.wait(), 1)
+                self.assertEqual(sent, ['on', 'off'])
+            finally:
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
     async def test_queue_is_bounded(self):
         publisher = StatePublisher(None, capacity=2)
         for index in range(100): publisher.offer({'entity_id': str(index)}, index)
@@ -153,6 +172,10 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
         await self.addon.execute_command(self.command)
         await self.addon.execute_command(self.command)
         self.assertEqual(self.addon.call_ha_service.await_count, 1)
+        self.assertEqual(self.addon.command_journal.pending(), [('trace-real', 'unknown')])
+    async def test_failed_service_response_preserves_uncertain_outcome(self):
+        self.addon.call_ha_service.return_value = False
+        await self.addon.execute_command(self.command)
         self.assertEqual(self.addon.command_journal.pending(), [('trace-real', 'unknown')])
     async def test_http_error_is_not_an_acknowledgement(self):
         class Response:

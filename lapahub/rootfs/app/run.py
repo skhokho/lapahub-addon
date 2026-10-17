@@ -598,11 +598,14 @@ class LapaHubAddon:
                 elapsed = (time.time() - start_time) * 1000 if start_time else 0
                 if resp.status == 200:
                     logger.info(f"[RT] Pushed {device['entity_id']} to cloud ({elapsed:.0f}ms)")
+                    return True
                 else:
                     logger.warning(f"[RT] Push failed for {device['entity_id']}: {resp.status} ({elapsed:.0f}ms)")
         except Exception as e:
             elapsed = (time.time() - start_time) * 1000 if start_time else 0
             logger.warning(f"[RT] Push error for {device['entity_id']}: {e} ({elapsed:.0f}ms)")
+
+        return False
 
     # ==================== Sensor Polling (Beta Mode) ====================
 
@@ -2005,7 +2008,7 @@ class LapaHubAddon:
             success = await self.call_ha_service(domain, service, service_data)
 
         # Report command result back to cloud
-        self.command_journal.complete(cmd_id, "service_accepted" if success else "failed")
+        self.command_journal.complete(cmd_id, "service_accepted" if success else "unknown")
 
     async def report_command_result(self, cmd_id: str, outcome: str):
         """Return only after a successful HTTP acknowledgement."""
