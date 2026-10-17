@@ -22,6 +22,7 @@ from collections import deque
 
 import aiohttp
 from aiohttp import web
+from reliability import CommandJournal, StatePublisher
 
 # Configure logging
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").upper()
@@ -164,6 +165,8 @@ class LapaHubAddon:
 
         self.session: aiohttp.ClientSession | None = None
         self.devices: dict = {}
+        self.command_journal = CommandJournal("/data/command_journal.sqlite3")
+        self.state_publisher = StatePublisher(self.push_state_change_to_cloud)
         self.running = True
         self.shutting_down = False
 
@@ -286,6 +289,10 @@ class LapaHubAddon:
             tasks = [
                 self.device_sync_loop(),
                 self.command_listener_loop(),
+                self.command_ack_loop(),
+                self.state_publisher.worker(),
+                self.state_publisher.worker(),
+                self.state_publisher.worker(),
                 self.energy_report_loop(),
                 self.token_refresh_loop(),
                 self.ha_websocket_loop(),      # LAPA-74: Real-time state updates
@@ -568,7 +575,9 @@ class LapaHubAddon:
         # Push state change to cloud (skip sensors in polling mode)
         should_push_realtime = domain != "sensor" or self.sensor_realtime
         if self.firebase_credentials and should_push_realtime:
-            await self.push_state_change_to_cloud(device, start_time)
+            self.state_publisher.offer(device, start_time)
+            if self.state_publisher.dropped:
+                logger.warning("State publication overflow: dropped=%s queued=%s", self.state_publisher.dropped, len(self.state_publisher.pending))
 
     async def push_state_change_to_cloud(self, device: dict, start_time: float = None):
         """Push a single device state change to cloud."""
@@ -1752,7 +1761,7 @@ class LapaHubAddon:
 
         async with self.session.get(
             api_url,
-            params={"hubId": self.hub_id},
+            params={"hubId": self.hub_id, "commandProtocol": "2"},
             headers={
                 "Authorization": f"Bearer {self.firebase_credentials.get('token', '')}",
                 "Accept": "text/event-stream",
@@ -1826,7 +1835,7 @@ class LapaHubAddon:
 
         async with self.session.get(
             api_url,
-            params={"hubId": self.hub_id},
+            params={"hubId": self.hub_id, "commandProtocol": "2"},
             headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
             timeout=aiohttp.ClientTimeout(total=30),
         ) as resp:
@@ -1837,6 +1846,29 @@ class LapaHubAddon:
                     await self.execute_command(cmd)
 
     async def execute_command(self, command: dict):
+        cmd_id = command.get("id")
+        claimed = False
+        try:
+            if not self.command_journal.claim(command):
+                logger.info("Duplicate command %s suppressed", cmd_id)
+                return
+            claimed = True
+            deadline = command.get("expires_at")
+            if deadline is not None and float(deadline) <= datetime.now(timezone.utc).timestamp():
+                self.command_journal.complete(cmd_id, "expired")
+                logger.warning("Expired command %s rejected", cmd_id)
+                return
+            await self._execute_command_once(command)
+        except asyncio.CancelledError:
+            # Keep the pre-dispatch receipt durable; restart resolves it as unknown.
+            raise
+        except Exception:
+            logger.exception("Command %s could not complete", cmd_id)
+            # Do not blindly retry a command whose physical effect is uncertain.
+            if claimed:
+                self.command_journal.complete(cmd_id, "unknown")
+
+    async def _execute_command_once(self, command: dict):
         """Execute a command from the cloud.
 
         Handles both standard device commands and special automation/scene commands:
@@ -1968,34 +2000,43 @@ class LapaHubAddon:
             }
 
             service = service_map.get(action, action)
-            service_data = {"entity_id": entity_id, **params}
+            service_data = {**params, "entity_id": entity_id}
 
             success = await self.call_ha_service(domain, service, service_data)
 
         # Report command result back to cloud
-        await self.report_command_result(cmd_id, success)
+        self.command_journal.complete(cmd_id, "service_accepted" if success else "failed")
 
-    async def report_command_result(self, cmd_id: str, success: bool):
-        """Report command execution result to cloud."""
+    async def report_command_result(self, cmd_id: str, outcome: str):
+        """Return only after a successful HTTP acknowledgement."""
         if not self.firebase_credentials:
-            return
-
+            raise RuntimeError("No cloud session for acknowledgement")
         api_url = f"https://us-central1-{self.firebase_project}.cloudfunctions.net/reportCommandResult"
+        async with self.session.post(
+            api_url,
+            json={"commandId": cmd_id, "hubId": self.hub_id,
+                  "success": outcome == "service_accepted", "outcome": outcome,
+                  "timestamp": datetime.now(timezone.utc).isoformat()},
+            headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"Acknowledgement HTTP {resp.status}")
 
-        try:
-            await self.session.post(
-                api_url,
-                json={
-                    "commandId": cmd_id,
-                    "hubId": self.hub_id,
-                    "success": success,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
-                headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
-                timeout=aiohttp.ClientTimeout(total=30),
-            )
-        except Exception as e:
-            logger.warning(f"Could not report command result: {e}")
+    async def command_ack_loop(self):
+        delay = 1
+        while self.running:
+            try:
+                for cmd_id, outcome in self.command_journal.pending():
+                    await self.report_command_result(cmd_id, outcome)
+                    self.command_journal.acknowledge(cmd_id)
+                delay = 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.warning("Acknowledgement retained for retry: %s", error)
+                delay = min(delay * 2, 30)
+            await asyncio.sleep(delay)
 
     async def energy_report_loop(self):
         """Periodically report energy data to cloud."""
@@ -2595,6 +2636,10 @@ class LapaHubAddon:
             "websocket_connected": self.ha_websocket is not None and not self.ha_websocket.closed,
             "token_expires_at": token_expires,
             "retry_count": self.current_retry_count,
+            "state_publication": {"queued": len(self.state_publisher.pending),
+                                  "active": len(self.state_publisher.active),
+                                  "coalesced": self.state_publisher.coalesced,
+                                  "dropped": self.state_publisher.dropped},
             "uptime_seconds": int(uptime),
             "cpu_percent": cpu_percent,
             "memory_percent": memory.percent if memory else 0,
