@@ -37,6 +37,15 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(self.journal.pending(), [])
         self.assertFalse(self.journal.claim(self.command))
         self.assertEqual(self.journal.pending(), [('trace-1', 'service_accepted')])
+    def test_trace_survives_restart_and_preserves_attempt_duration(self):
+        self.journal.claim(self.command)
+        self.journal.complete('trace-1', 'service_accepted')
+        trace = self.journal.trace('trace-1')
+        self.assertGreaterEqual(trace['addonAttemptDurationMs'], 0)
+        self.assertLessEqual(trace['addonReceivedAt'], trace['addonCompletedAt'])
+        self.journal.close()
+        self.journal = CommandJournal(self.path)
+        self.assertEqual(self.journal.trace('trace-1'), trace)
     def test_id_reuse_rejected_without_overwriting_result(self):
         self.journal.claim(self.command)
         self.journal.complete('trace-1', 'service_accepted')
@@ -177,6 +186,18 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.addon.call_ha_service.return_value = False
         await self.addon.execute_command(self.command)
         self.assertEqual(self.addon.command_journal.pending(), [('trace-real', 'unknown')])
+    async def test_scene_and_automation_targets_are_read_from_callable_envelope(self):
+        self.addon.trigger_scene = AsyncMock(return_value=True)
+        self.addon.delete_scene = AsyncMock(return_value=True)
+        await self.addon.execute_command({'id': 'scene-activate', 'action': 'scene.turn_on', 'params': {'entity_id': 'scene.evening'}})
+        self.addon.trigger_scene.assert_awaited_once_with('scene.evening')
+        await self.addon.execute_command({'id': 'scene-delete', 'action': 'scene.delete', 'params': {'entity_id': 'scene.evening'}})
+        self.addon.delete_scene.assert_awaited_once_with('scene.evening')
+        await self.addon.execute_command({'id': 'automation-trigger', 'action': 'automation.trigger', 'params': {'entity_id': 'automation.office'}})
+        self.addon.call_ha_service.assert_awaited_once_with('automation', 'trigger', {'entity_id': 'automation.office'})
+    async def test_root_command_cannot_redirect_entity_through_service_data(self):
+        await self.addon.execute_command({**self.command, 'params': {'entity_id': 'light.other'}})
+        self.addon.call_ha_service.assert_awaited_once_with('light', 'turn_on', {'entity_id': 'light.office'})
     async def test_http_error_is_not_an_acknowledgement(self):
         class Response:
             status = 500

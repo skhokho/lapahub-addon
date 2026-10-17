@@ -20,7 +20,10 @@ class CommandJournal:
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('PRAGMA synchronous=FULL')
         self.capacity = capacity
+        self._starts = {}
         self.db.execute('CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, outcome TEXT NOT NULL, acked INTEGER NOT NULL DEFAULT 0, updated REAL NOT NULL)')
+        if 'trace' not in {row[1] for row in self.db.execute('PRAGMA table_info(commands)')}:
+            self.db.execute("ALTER TABLE commands ADD COLUMN trace TEXT NOT NULL DEFAULT '{}'")
         with self.db:
             self.db.execute("UPDATE commands SET outcome='unknown', acked=0 WHERE outcome='executing'")
 
@@ -30,6 +33,7 @@ class CommandJournal:
             raise ValueError('A stable command ID is required')
         payload = {key: command.get(key) for key in ('entity_id', 'action', 'params')}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        started = time.monotonic()
         with self.db:
             row = self.db.execute('SELECT fingerprint, outcome FROM commands WHERE id=?', (command_id,)).fetchone()
             if row:
@@ -41,14 +45,27 @@ class CommandJournal:
             self.db.execute('DELETE FROM commands WHERE acked=1 AND updated<?', (time.time() - 7 * 86400,))
             if self.db.execute('SELECT COUNT(*) FROM commands').fetchone()[0] >= self.capacity:
                 raise RuntimeError('Command journal full; refusing untracked execution')
-            self.db.execute('INSERT INTO commands VALUES (?, ?, ?, 0, ?)', (command_id, digest, 'executing', time.time()))
+            observed = time.time()
+            trace = {'addonReceivedAt': command.get('_received_at', observed), 'addonDispatchedAt': observed}
+            self.db.execute('INSERT INTO commands (id, fingerprint, outcome, acked, updated, trace) VALUES (?, ?, ?, 0, ?, ?)',
+                            (command_id, digest, 'executing', observed, json.dumps(trace)))
+        self._starts[command_id] = started
         return True
 
     def complete(self, command_id, outcome):
         if outcome not in ('service_accepted', 'failed', 'expired', 'unknown'):
             raise ValueError('Invalid command outcome')
+        trace = self.trace(command_id)
+        trace['addonCompletedAt'] = time.time()
+        started = self._starts.pop(command_id, None)
+        if started is not None: trace['addonAttemptDurationMs'] = (time.monotonic() - started) * 1000
         with self.db:
-            self.db.execute('UPDATE commands SET outcome=?, acked=0, updated=? WHERE id=?', (outcome, time.time(), command_id))
+            self.db.execute('UPDATE commands SET outcome=?, acked=0, updated=?, trace=? WHERE id=?',
+                            (outcome, time.time(), json.dumps(trace), command_id))
+
+    def trace(self, command_id):
+        row = self.db.execute('SELECT trace FROM commands WHERE id=?', (command_id,)).fetchone()
+        return json.loads(row[0]) if row else {}
 
     def pending(self, limit=20):
         return self.db.execute("SELECT id, outcome FROM commands WHERE acked=0 AND outcome!='executing' ORDER BY updated LIMIT ?", (limit,)).fetchall()

@@ -1220,10 +1220,10 @@ class LapaHubAddon:
         try:
             logger.info(f"Creating scene '{scene_id}' via scene.create service")
 
-            # Build service data
-            service_data = {
-                "scene_id": f"lapahub_{scene_id}",
-            }
+            slug = scene_id.removeprefix("scene.").replace("-", "_")
+            if not slug.startswith("lapahub_"):
+                slug = "lapahub_" + slug
+            service_data = {"scene_id": slug}
 
             if entities:
                 # Use explicit entity states
@@ -1244,40 +1244,14 @@ class LapaHubAddon:
             return False
 
     async def delete_scene(self, scene_id: str) -> bool:
-        """Delete a scene from Home Assistant via scene.delete service.
+        """Delete a dynamic scene using HA's supported scene.delete action.
 
-        Note: HA doesn't have a native scene.delete service for dynamically created scenes.
-        We can use homeassistant.reload_scenes after deleting from scenes.yaml,
-        but for dynamically created scenes (via scene.create), they persist until HA restart.
-
-        For now, we'll log a warning since dynamic scene deletion isn't fully supported.
-
-        Args:
-            scene_id: The scene ID (e.g., 'lapahub_abc123')
-
-        Returns:
-            True if scene was handled, False on error
+        Unsupported/static scenes fail explicitly rather than reporting deletion.
         """
-        try:
-            # For dynamically created scenes (scene.create), HA doesn't have a direct delete
-            # The best approach is to call homeassistant.update_entity to remove it
-            # or accept that it will be cleaned up on HA restart
-
-            entity_id = f"scene.lapahub_{scene_id}" if not scene_id.startswith("scene.") else scene_id
-
-            logger.info(f"Scene delete requested for '{entity_id}'")
-            logger.warning(
-                f"HA doesn't support deleting dynamically created scenes. "
-                f"Scene '{entity_id}' will be removed on HA restart."
-            )
-            self.log_activity(f"Scene marked for deletion: {scene_id} (removed on HA restart)")
-
-            # Return True to indicate the command was handled (even though we can't truly delete)
-            return True
-
-        except Exception as e:
-            logger.error(f"Error handling scene delete: {e}")
-            return False
+        entity_id = scene_id if scene_id.startswith("scene.") else (
+            "scene." + (scene_id if scene_id.startswith("lapahub_") else "lapahub_" + scene_id).replace("-", "_")
+        )
+        return await self.call_ha_service("scene", "delete", {"entity_id": entity_id})
 
     async def get_ha_states(self) -> list:
         """Get all entity states from Home Assistant."""
@@ -1815,6 +1789,10 @@ class LapaHubAddon:
                 commands = payload.get("commands", [])
                 if commands:
                     logger.info(f"SSE: received {len(commands)} command(s)")
+                    received_at = datetime.now(timezone.utc).timestamp()
+                    for cmd in commands:
+                        cmd['_received_at'] = received_at
+                        logger.info("Command received id=%s intent=%s", cmd.get('id'), cmd.get('clientIntentId'))
                     for cmd in commands:
                         await self.execute_command(cmd)
             except json.JSONDecodeError as e:
@@ -1845,6 +1823,10 @@ class LapaHubAddon:
             if resp.status == 200:
                 data = await resp.json()
                 commands = data.get("commands", [])
+                received_at = datetime.now(timezone.utc).timestamp()
+                for cmd in commands:
+                    cmd['_received_at'] = received_at
+                    logger.info("Command received id=%s intent=%s", cmd.get('id'), cmd.get('clientIntentId'))
                 for cmd in commands:
                     await self.execute_command(cmd)
 
@@ -1886,9 +1868,9 @@ class LapaHubAddon:
         - automation.toggle: Enable/disable an automation
         """
         cmd_id = command.get("id")
-        entity_id = command.get("entity_id", "")
-        action = command.get("action")
         params = command.get("params", {})
+        entity_id = command.get("entity_id") or params.get("entity_id", "")
+        action = command.get("action")
 
         logger.info(f"Executing command {cmd_id}: {action} on {entity_id or 'N/A'}")
         success = False
@@ -1972,13 +1954,13 @@ class LapaHubAddon:
 
         elif action == "scene.delete":
             # Delete a scene
-            scene_id = params.get("scene_id")
+            scene_id = params.get("scene_id") or params.get("entity_id")
             if scene_id:
                 success = await self.delete_scene(scene_id)
             else:
                 logger.error("scene.delete requires scene_id in params")
 
-        elif action == "scene.activate":
+        elif action in ("scene.activate", "scene.turn_on"):
             # Activate a scene
             if entity_id:
                 success = await self.trigger_scene(entity_id)
@@ -2003,6 +1985,10 @@ class LapaHubAddon:
             }
 
             service = service_map.get(action, action)
+            if isinstance(service, str) and "." in service:
+                action_domain, service = service.split(".", 1)
+                if action_domain not in (domain, "homeassistant"):
+                    raise ValueError("Command domain does not match target entity")
             service_data = {**params, "entity_id": entity_id}
 
             success = await self.call_ha_service(domain, service, service_data)
@@ -2019,6 +2005,7 @@ class LapaHubAddon:
             api_url,
             json={"commandId": cmd_id, "hubId": self.hub_id,
                   "success": outcome == "service_accepted", "outcome": outcome,
+                  "trace": self.command_journal.trace(cmd_id),
                   "timestamp": datetime.now(timezone.utc).isoformat()},
             headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
             timeout=aiohttp.ClientTimeout(total=10),
