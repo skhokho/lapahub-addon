@@ -1,3 +1,12 @@
+# 1.0.54 — Command reliability and state responsiveness
+
+- Durable command receipts prevent duplicate HA dispatch across reconnect/restart.
+- Persist acknowledgements and retry HTTP failures without repeating device actions.
+- Reject expired instructions and preserve unknown outcomes after interrupted execution.
+- Advertise command protocol 2 for safe cloud lease recovery.
+- Keep HA state ingestion responsive with bounded publication workers, per-entity ordering and queue metrics.
+- Requires the companion cloud reliability update before the new app is distributed.
+
 # Changelog
 
 ## 1.0.52

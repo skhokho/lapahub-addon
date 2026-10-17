@@ -22,6 +22,7 @@ from collections import deque
 
 import aiohttp
 from aiohttp import web
+from reliability import CommandJournal, StatePublisher
 
 # Configure logging
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").upper()
@@ -164,6 +165,8 @@ class LapaHubAddon:
 
         self.session: aiohttp.ClientSession | None = None
         self.devices: dict = {}
+        self.command_journal = CommandJournal("/data/command_journal.sqlite3")
+        self.state_publisher = StatePublisher(self.push_state_change_to_cloud)
         self.running = True
         self.shutting_down = False
 
@@ -286,6 +289,10 @@ class LapaHubAddon:
             tasks = [
                 self.device_sync_loop(),
                 self.command_listener_loop(),
+                self.command_ack_loop(),
+                self.state_publisher.worker(),
+                self.state_publisher.worker(),
+                self.state_publisher.worker(),
                 self.energy_report_loop(),
                 self.token_refresh_loop(),
                 self.ha_websocket_loop(),      # LAPA-74: Real-time state updates
@@ -568,7 +575,9 @@ class LapaHubAddon:
         # Push state change to cloud (skip sensors in polling mode)
         should_push_realtime = domain != "sensor" or self.sensor_realtime
         if self.firebase_credentials and should_push_realtime:
-            await self.push_state_change_to_cloud(device, start_time)
+            self.state_publisher.offer(device, start_time)
+            if self.state_publisher.dropped:
+                logger.warning("State publication overflow: dropped=%s queued=%s", self.state_publisher.dropped, len(self.state_publisher.pending))
 
     async def push_state_change_to_cloud(self, device: dict, start_time: float = None):
         """Push a single device state change to cloud."""
@@ -589,11 +598,14 @@ class LapaHubAddon:
                 elapsed = (time.time() - start_time) * 1000 if start_time else 0
                 if resp.status == 200:
                     logger.info(f"[RT] Pushed {device['entity_id']} to cloud ({elapsed:.0f}ms)")
+                    return True
                 else:
                     logger.warning(f"[RT] Push failed for {device['entity_id']}: {resp.status} ({elapsed:.0f}ms)")
         except Exception as e:
             elapsed = (time.time() - start_time) * 1000 if start_time else 0
             logger.warning(f"[RT] Push error for {device['entity_id']}: {e} ({elapsed:.0f}ms)")
+
+        return False
 
     # ==================== Sensor Polling (Beta Mode) ====================
 
@@ -1208,10 +1220,10 @@ class LapaHubAddon:
         try:
             logger.info(f"Creating scene '{scene_id}' via scene.create service")
 
-            # Build service data
-            service_data = {
-                "scene_id": f"lapahub_{scene_id}",
-            }
+            slug = scene_id.removeprefix("scene.").replace("-", "_")
+            if not slug.startswith("lapahub_"):
+                slug = "lapahub_" + slug
+            service_data = {"scene_id": slug}
 
             if entities:
                 # Use explicit entity states
@@ -1232,40 +1244,14 @@ class LapaHubAddon:
             return False
 
     async def delete_scene(self, scene_id: str) -> bool:
-        """Delete a scene from Home Assistant via scene.delete service.
+        """Delete a dynamic scene using HA's supported scene.delete action.
 
-        Note: HA doesn't have a native scene.delete service for dynamically created scenes.
-        We can use homeassistant.reload_scenes after deleting from scenes.yaml,
-        but for dynamically created scenes (via scene.create), they persist until HA restart.
-
-        For now, we'll log a warning since dynamic scene deletion isn't fully supported.
-
-        Args:
-            scene_id: The scene ID (e.g., 'lapahub_abc123')
-
-        Returns:
-            True if scene was handled, False on error
+        Unsupported/static scenes fail explicitly rather than reporting deletion.
         """
-        try:
-            # For dynamically created scenes (scene.create), HA doesn't have a direct delete
-            # The best approach is to call homeassistant.update_entity to remove it
-            # or accept that it will be cleaned up on HA restart
-
-            entity_id = f"scene.lapahub_{scene_id}" if not scene_id.startswith("scene.") else scene_id
-
-            logger.info(f"Scene delete requested for '{entity_id}'")
-            logger.warning(
-                f"HA doesn't support deleting dynamically created scenes. "
-                f"Scene '{entity_id}' will be removed on HA restart."
-            )
-            self.log_activity(f"Scene marked for deletion: {scene_id} (removed on HA restart)")
-
-            # Return True to indicate the command was handled (even though we can't truly delete)
-            return True
-
-        except Exception as e:
-            logger.error(f"Error handling scene delete: {e}")
-            return False
+        entity_id = scene_id if scene_id.startswith("scene.") else (
+            "scene." + (scene_id if scene_id.startswith("lapahub_") else "lapahub_" + scene_id).replace("-", "_")
+        )
+        return await self.call_ha_service("scene", "delete", {"entity_id": entity_id})
 
     async def get_ha_states(self) -> list:
         """Get all entity states from Home Assistant."""
@@ -1752,7 +1738,7 @@ class LapaHubAddon:
 
         async with self.session.get(
             api_url,
-            params={"hubId": self.hub_id},
+            params={"hubId": self.hub_id, "commandProtocol": "2"},
             headers={
                 "Authorization": f"Bearer {self.firebase_credentials.get('token', '')}",
                 "Accept": "text/event-stream",
@@ -1803,6 +1789,10 @@ class LapaHubAddon:
                 commands = payload.get("commands", [])
                 if commands:
                     logger.info(f"SSE: received {len(commands)} command(s)")
+                    received_at = datetime.now(timezone.utc).timestamp()
+                    for cmd in commands:
+                        cmd['_received_at'] = received_at
+                        logger.info("Command received id=%s intent=%s", cmd.get('id'), cmd.get('clientIntentId'))
                     for cmd in commands:
                         await self.execute_command(cmd)
             except json.JSONDecodeError as e:
@@ -1826,17 +1816,44 @@ class LapaHubAddon:
 
         async with self.session.get(
             api_url,
-            params={"hubId": self.hub_id},
+            params={"hubId": self.hub_id, "commandProtocol": "2"},
             headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
             timeout=aiohttp.ClientTimeout(total=30),
         ) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 commands = data.get("commands", [])
+                received_at = datetime.now(timezone.utc).timestamp()
+                for cmd in commands:
+                    cmd['_received_at'] = received_at
+                    logger.info("Command received id=%s intent=%s", cmd.get('id'), cmd.get('clientIntentId'))
                 for cmd in commands:
                     await self.execute_command(cmd)
 
     async def execute_command(self, command: dict):
+        cmd_id = command.get("id")
+        claimed = False
+        try:
+            if not self.command_journal.claim(command):
+                logger.info("Duplicate command %s suppressed", cmd_id)
+                return
+            claimed = True
+            deadline = command.get("expires_at")
+            if deadline is not None and float(deadline) <= datetime.now(timezone.utc).timestamp():
+                self.command_journal.complete(cmd_id, "expired")
+                logger.warning("Expired command %s rejected", cmd_id)
+                return
+            await self._execute_command_once(command)
+        except asyncio.CancelledError:
+            # Keep the pre-dispatch receipt durable; restart resolves it as unknown.
+            raise
+        except Exception:
+            logger.exception("Command %s could not complete", cmd_id)
+            # Do not blindly retry a command whose physical effect is uncertain.
+            if claimed:
+                self.command_journal.complete(cmd_id, "unknown")
+
+    async def _execute_command_once(self, command: dict):
         """Execute a command from the cloud.
 
         Handles both standard device commands and special automation/scene commands:
@@ -1851,9 +1868,9 @@ class LapaHubAddon:
         - automation.toggle: Enable/disable an automation
         """
         cmd_id = command.get("id")
-        entity_id = command.get("entity_id", "")
-        action = command.get("action")
         params = command.get("params", {})
+        entity_id = command.get("entity_id") or params.get("entity_id", "")
+        action = command.get("action")
 
         logger.info(f"Executing command {cmd_id}: {action} on {entity_id or 'N/A'}")
         success = False
@@ -1937,13 +1954,13 @@ class LapaHubAddon:
 
         elif action == "scene.delete":
             # Delete a scene
-            scene_id = params.get("scene_id")
+            scene_id = params.get("scene_id") or params.get("entity_id")
             if scene_id:
                 success = await self.delete_scene(scene_id)
             else:
                 logger.error("scene.delete requires scene_id in params")
 
-        elif action == "scene.activate":
+        elif action in ("scene.activate", "scene.turn_on"):
             # Activate a scene
             if entity_id:
                 success = await self.trigger_scene(entity_id)
@@ -1968,34 +1985,48 @@ class LapaHubAddon:
             }
 
             service = service_map.get(action, action)
-            service_data = {"entity_id": entity_id, **params}
+            if isinstance(service, str) and "." in service:
+                action_domain, service = service.split(".", 1)
+                if action_domain not in (domain, "homeassistant"):
+                    raise ValueError("Command domain does not match target entity")
+            service_data = {**params, "entity_id": entity_id}
 
             success = await self.call_ha_service(domain, service, service_data)
 
         # Report command result back to cloud
-        await self.report_command_result(cmd_id, success)
+        self.command_journal.complete(cmd_id, "service_accepted" if success else "unknown")
 
-    async def report_command_result(self, cmd_id: str, success: bool):
-        """Report command execution result to cloud."""
+    async def report_command_result(self, cmd_id: str, outcome: str):
+        """Return only after a successful HTTP acknowledgement."""
         if not self.firebase_credentials:
-            return
-
+            raise RuntimeError("No cloud session for acknowledgement")
         api_url = f"https://us-central1-{self.firebase_project}.cloudfunctions.net/reportCommandResult"
+        async with self.session.post(
+            api_url,
+            json={"commandId": cmd_id, "hubId": self.hub_id,
+                  "success": outcome == "service_accepted", "outcome": outcome,
+                  "trace": self.command_journal.trace(cmd_id),
+                  "timestamp": datetime.now(timezone.utc).isoformat()},
+            headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"Acknowledgement HTTP {resp.status}")
 
-        try:
-            await self.session.post(
-                api_url,
-                json={
-                    "commandId": cmd_id,
-                    "hubId": self.hub_id,
-                    "success": success,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
-                headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
-                timeout=aiohttp.ClientTimeout(total=30),
-            )
-        except Exception as e:
-            logger.warning(f"Could not report command result: {e}")
+    async def command_ack_loop(self):
+        delay = 1
+        while self.running:
+            try:
+                for cmd_id, outcome in self.command_journal.pending():
+                    await self.report_command_result(cmd_id, outcome)
+                    self.command_journal.acknowledge(cmd_id)
+                delay = 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.warning("Acknowledgement retained for retry: %s", error)
+                delay = min(delay * 2, 30)
+            await asyncio.sleep(delay)
 
     async def energy_report_loop(self):
         """Periodically report energy data to cloud."""
@@ -2595,6 +2626,10 @@ class LapaHubAddon:
             "websocket_connected": self.ha_websocket is not None and not self.ha_websocket.closed,
             "token_expires_at": token_expires,
             "retry_count": self.current_retry_count,
+            "state_publication": {"queued": len(self.state_publisher.pending),
+                                  "active": len(self.state_publisher.active),
+                                  "coalesced": self.state_publisher.coalesced,
+                                  "dropped": self.state_publisher.dropped},
             "uptime_seconds": int(uptime),
             "cpu_percent": cpu_percent,
             "memory_percent": memory.percent if memory else 0,
