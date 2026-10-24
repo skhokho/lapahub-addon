@@ -11,6 +11,9 @@
 - Restore missing definitions after HA reload/restart without activating devices.
 - Suppress deleted scenes before HA deletion, including uncertain responses.
 - Resolve snapshots once and retain explicit states across restart.
+- Recheck command deadlines after waiting for scene locks, HA lookups and restoration; stale scene activations never turn devices on.
+- Reject mutation of imported HA scenes instead of silently editing a different prefixed scene.
+- Cloud verification covers 30 tests, including mocked scene CRUD, edit persistence and deadline expiry during preflight. Physical scene-member confirmation remains a release gate.
 
 # Changelog
 

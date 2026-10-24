@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lapahub/rootfs/app'))
-from reliability import CommandJournal, StatePublisher
+from reliability import CommandExpired, CommandJournal, StatePublisher, check_command_deadline
 
 
 class JournalTests(unittest.TestCase):
@@ -151,6 +151,7 @@ def executor_type():
         'execute_command', '_execute_command_once', 'report_command_result', 'command_ack_loop'}]
     namespace = {'asyncio': asyncio, 'datetime': datetime, 'timezone': timezone,
                  'logger': logging.getLogger('addon-test'),
+                 'CommandExpired': CommandExpired, 'check_command_deadline': check_command_deadline,
                  'aiohttp': SimpleNamespace(ClientTimeout=lambda **kwargs: kwargs)}
     for method in methods:
         exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])), str(source), 'exec'), namespace)
@@ -190,9 +191,9 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.addon.trigger_scene = AsyncMock(return_value=True)
         self.addon.delete_scene = AsyncMock(return_value=True)
         await self.addon.execute_command({'id': 'scene-activate', 'action': 'scene.turn_on', 'params': {'entity_id': 'scene.evening'}})
-        self.addon.trigger_scene.assert_awaited_once_with('scene.evening')
+        self.addon.trigger_scene.assert_awaited_once_with('scene.evening', expires_at=None)
         await self.addon.execute_command({'id': 'scene-delete', 'action': 'scene.delete', 'params': {'entity_id': 'scene.evening'}})
-        self.addon.delete_scene.assert_awaited_once_with('scene.evening')
+        self.addon.delete_scene.assert_awaited_once_with('scene.evening', expires_at=None)
         await self.addon.execute_command({'id': 'automation-trigger', 'action': 'automation.trigger', 'params': {'entity_id': 'automation.office'}})
         self.addon.call_ha_service.assert_awaited_once_with('automation', 'trigger', {'entity_id': 'automation.office'})
     async def test_root_command_cannot_redirect_entity_through_service_data(self):

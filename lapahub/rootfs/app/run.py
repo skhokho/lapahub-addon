@@ -22,7 +22,7 @@ from collections import deque
 
 import aiohttp
 from aiohttp import web
-from reliability import CommandJournal, StatePublisher
+from reliability import CommandExpired, CommandJournal, StatePublisher, check_command_deadline
 from managed_scenes import ManagedScenes
 
 # Configure logging
@@ -1106,17 +1106,22 @@ class LapaHubAddon:
                     if not accepted:
                         logger.warning("Managed scene definition could not be restored: %s", entity_id)
 
-    async def trigger_scene(self, entity_id: str) -> bool:
+    async def trigger_scene(self, entity_id: str, expires_at=None) -> bool:
         """Ensure a managed definition exists, then dispatch one activation."""
         async with self.scene_lock:
+            check_command_deadline(expires_at)
             definition = self.managed_scenes.active().get(entity_id)
             if definition:
                 states = await self.get_ha_states()
                 if not states:
                     return False
                 if entity_id not in {state.get("entity_id") for state in states}:
+                    check_command_deadline(expires_at)
                     if not await self.call_ha_service("scene", "create", definition):
                         return False
+            # HA lookups/restoration and another scene action may consume the
+            # confirmation window. Never activate stale intent after preflight.
+            check_command_deadline(expires_at)
             return await self.call_ha_service("scene", "turn_on", {"entity_id": entity_id})
 
     async def toggle_automation(self, entity_id: str, enable: bool) -> bool:
@@ -1227,8 +1232,10 @@ class LapaHubAddon:
             logger.error(f"Error deleting automation: {e}")
             return False
 
-    async def create_scene(self, scene_id: str, entities: dict = None, snapshot_entities: list = None, scene_name: str = None) -> bool:
+    async def create_scene(self, scene_id: str, entities: dict = None, snapshot_entities: list = None, scene_name: str = None, expires_at=None) -> bool:
         """Create a dynamic scene and durably retain confirmed explicit states."""
+        if scene_id.startswith("scene.") and not scene_id.startswith("scene.lapahub_"):
+            raise ValueError("Imported HA scenes cannot be replaced by LapaHub")
         slug = scene_id.removeprefix("scene.").replace("-", "_")
         if not slug.startswith("lapahub_"):
             slug = "lapahub_" + slug
@@ -1248,18 +1255,22 @@ class LapaHubAddon:
         else:
             return False
         async with self.scene_lock:
+            check_command_deadline(expires_at)
             accepted = await self.call_ha_service("scene", "create", service_data)
             if accepted:
                 self.managed_scenes.save("scene." + slug, service_data)
                 self.log_activity(f"Created scene: {scene_name or scene_id}")
             return accepted
 
-    async def delete_scene(self, scene_id: str) -> bool:
+    async def delete_scene(self, scene_id: str, expires_at=None) -> bool:
         """Suppress persistent restoration before asking HA to delete a scene."""
+        if scene_id.startswith("scene.") and not scene_id.startswith("scene.lapahub_"):
+            raise ValueError("Imported HA scenes cannot be deleted by LapaHub")
         entity_id = scene_id if scene_id.startswith("scene.") else (
             "scene." + (scene_id if scene_id.startswith("lapahub_") else "lapahub_" + scene_id).replace("-", "_")
         )
         async with self.scene_lock:
+            check_command_deadline(expires_at)
             self.managed_scenes.suppress(entity_id)
             return await self.call_ha_service("scene", "delete", {"entity_id": entity_id})
 
@@ -1848,12 +1859,12 @@ class LapaHubAddon:
                 logger.info("Duplicate command %s suppressed", cmd_id)
                 return
             claimed = True
-            deadline = command.get("expires_at")
-            if deadline is not None and float(deadline) <= datetime.now(timezone.utc).timestamp():
-                self.command_journal.complete(cmd_id, "expired")
-                logger.warning("Expired command %s rejected", cmd_id)
-                return
+            check_command_deadline(command.get("expires_at"))
             await self._execute_command_once(command)
+        except CommandExpired:
+            if claimed:
+                self.command_journal.complete(cmd_id, "expired")
+            logger.warning("Expired command %s rejected", cmd_id)
         except asyncio.CancelledError:
             # Keep the pre-dispatch receipt durable; restart resolves it as unknown.
             raise
@@ -1940,7 +1951,8 @@ class LapaHubAddon:
                     scene_id=scene_id,
                     entities=entities,
                     snapshot_entities=snapshot_entities,
-                    scene_name=scene_name
+                    scene_name=scene_name,
+                    expires_at=command.get("expires_at"),
                 )
             else:
                 logger.error("scene.create requires scene_id and either entities or snapshot_entities")
@@ -1957,7 +1969,8 @@ class LapaHubAddon:
                     scene_id=scene_id,
                     entities=entities,
                     snapshot_entities=snapshot_entities,
-                    scene_name=scene_name
+                    scene_name=scene_name,
+                    expires_at=command.get("expires_at"),
                 )
             else:
                 logger.error("scene.update requires scene_id and either entities or snapshot_entities")
@@ -1966,14 +1979,14 @@ class LapaHubAddon:
             # Delete a scene
             scene_id = params.get("scene_id") or params.get("entity_id")
             if scene_id:
-                success = await self.delete_scene(scene_id)
+                success = await self.delete_scene(scene_id, expires_at=command.get("expires_at"))
             else:
                 logger.error("scene.delete requires scene_id in params")
 
         elif action in ("scene.activate", "scene.turn_on"):
             # Activate a scene
             if entity_id:
-                success = await self.trigger_scene(entity_id)
+                success = await self.trigger_scene(entity_id, expires_at=command.get("expires_at"))
             else:
                 logger.error("scene.activate requires entity_id")
 

@@ -8,6 +8,15 @@ from collections import OrderedDict
 from pathlib import Path
 
 
+class CommandExpired(Exception):
+    """A command expired before the next HA dispatch boundary."""
+
+
+def check_command_deadline(deadline):
+    if deadline is not None and float(deadline) <= time.time():
+        raise CommandExpired('Command expired before HA dispatch')
+
+
 class CommandJournal:
     """At-most-once dispatch per ID, with a durable acknowledgement outbox.
 
