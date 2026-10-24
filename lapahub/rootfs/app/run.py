@@ -23,6 +23,7 @@ from collections import deque
 import aiohttp
 from aiohttp import web
 from reliability import CommandJournal, StatePublisher
+from managed_scenes import ManagedScenes
 
 # Configure logging
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").upper()
@@ -166,6 +167,8 @@ class LapaHubAddon:
         self.session: aiohttp.ClientSession | None = None
         self.devices: dict = {}
         self.command_journal = CommandJournal("/data/command_journal.sqlite3")
+        self.managed_scenes = ManagedScenes("/data/managed_scenes.sqlite3")
+        self.scene_lock = asyncio.Lock()
         self.state_publisher = StatePublisher(self.push_state_change_to_cloud)
         self.running = True
         self.shutting_down = False
@@ -350,6 +353,8 @@ class LapaHubAddon:
             await self.session.close()
             logger.info("HTTP session closed")
 
+        self.managed_scenes.close()
+        self.command_journal.close()
         logger.info("Cleanup complete, addon stopped")
 
     async def authenticate_with_retry(self):
@@ -751,6 +756,8 @@ class LapaHubAddon:
     async def sync_scenes_and_automations(self):
         """Sync all scenes and automations from Home Assistant."""
         states = await self.get_ha_states()
+        if states:
+            await self.restore_managed_scenes(states)
 
         if not states:
             return
@@ -1089,9 +1096,28 @@ class LapaHubAddon:
         except Exception as e:
             logger.warning(f"Could not push scenes to cloud: {e}")
 
+    async def restore_managed_scenes(self, states):
+        """Restore missing definitions after HA reload/restart. Never activate them."""
+        present = {state.get("entity_id") for state in states}
+        async with self.scene_lock:
+            for entity_id, definition in self.managed_scenes.active().items():
+                if entity_id not in present:
+                    accepted = await self.call_ha_service("scene", "create", definition)
+                    if not accepted:
+                        logger.warning("Managed scene definition could not be restored: %s", entity_id)
+
     async def trigger_scene(self, entity_id: str) -> bool:
-        """Trigger a scene in Home Assistant."""
-        return await self.call_ha_service("scene", "turn_on", {"entity_id": entity_id})
+        """Ensure a managed definition exists, then dispatch one activation."""
+        async with self.scene_lock:
+            definition = self.managed_scenes.active().get(entity_id)
+            if definition:
+                states = await self.get_ha_states()
+                if not states:
+                    return False
+                if entity_id not in {state.get("entity_id") for state in states}:
+                    if not await self.call_ha_service("scene", "create", definition):
+                        return False
+            return await self.call_ha_service("scene", "turn_on", {"entity_id": entity_id})
 
     async def toggle_automation(self, entity_id: str, enable: bool) -> bool:
         """Enable or disable an automation."""
@@ -1202,56 +1228,40 @@ class LapaHubAddon:
             return False
 
     async def create_scene(self, scene_id: str, entities: dict = None, snapshot_entities: list = None, scene_name: str = None) -> bool:
-        """Create a scene in Home Assistant via scene.create service.
-
-        The scene.create service can either:
-        1. Use explicit entity states (entities dict)
-        2. Snapshot current states of specified entities (snapshot_entities list)
-
-        Args:
-            scene_id: The scene ID (e.g., 'lapahub_abc123')
-            entities: Dict mapping entity_id to desired state (optional)
-            snapshot_entities: List of entity_ids to snapshot current state (optional)
-            scene_name: Friendly name for the scene (optional)
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            logger.info(f"Creating scene '{scene_id}' via scene.create service")
-
-            slug = scene_id.removeprefix("scene.").replace("-", "_")
-            if not slug.startswith("lapahub_"):
-                slug = "lapahub_" + slug
-            service_data = {"scene_id": slug}
-
-            if entities:
-                # Use explicit entity states
-                service_data["entities"] = entities
-            elif snapshot_entities:
-                # Snapshot current states of specified entities
-                service_data["snapshot_entities"] = snapshot_entities
-
-            success = await self.call_ha_service("scene", "create", service_data)
-
-            if success:
-                self.log_activity(f"Created scene: {scene_name or scene_id}")
-
-            return success
-
-        except Exception as e:
-            logger.error(f"Error creating scene: {e}")
+        """Create a dynamic scene and durably retain confirmed explicit states."""
+        slug = scene_id.removeprefix("scene.").replace("-", "_")
+        if not slug.startswith("lapahub_"):
+            slug = "lapahub_" + slug
+        service_data = {"scene_id": slug}
+        if entities:
+            service_data["entities"] = entities
+        elif snapshot_entities:
+            # Resolve snapshots once; a restart must not snapshot different states.
+            states = await self.get_ha_states()
+            by_id = {state["entity_id"]: state for state in states}
+            if any(entity not in by_id for entity in snapshot_entities):
+                return False
+            service_data["entities"] = {
+                entity: {**by_id[entity].get("attributes", {}), "state": by_id[entity]["state"]}
+                for entity in snapshot_entities
+            }
+        else:
             return False
+        async with self.scene_lock:
+            accepted = await self.call_ha_service("scene", "create", service_data)
+            if accepted:
+                self.managed_scenes.save("scene." + slug, service_data)
+                self.log_activity(f"Created scene: {scene_name or scene_id}")
+            return accepted
 
     async def delete_scene(self, scene_id: str) -> bool:
-        """Delete a dynamic scene using HA's supported scene.delete action.
-
-        Unsupported/static scenes fail explicitly rather than reporting deletion.
-        """
+        """Suppress persistent restoration before asking HA to delete a scene."""
         entity_id = scene_id if scene_id.startswith("scene.") else (
             "scene." + (scene_id if scene_id.startswith("lapahub_") else "lapahub_" + scene_id).replace("-", "_")
         )
-        return await self.call_ha_service("scene", "delete", {"entity_id": entity_id})
+        async with self.scene_lock:
+            self.managed_scenes.suppress(entity_id)
+            return await self.call_ha_service("scene", "delete", {"entity_id": entity_id})
 
     async def get_ha_states(self) -> list:
         """Get all entity states from Home Assistant."""

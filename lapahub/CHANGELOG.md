@@ -7,7 +7,14 @@
 - Keep HA state ingestion responsive with bounded publication workers, per-entity ordering and queue metrics.
 - Requires the companion cloud reliability update before the new app is distributed.
 
+- Retain confirmed managed scene definitions in persistent SQLite storage.
+- Restore missing definitions after HA reload/restart without activating devices.
+- Suppress deleted scenes before HA deletion, including uncertain responses.
+- Resolve snapshots once and retain explicit states across restart.
+
 # Changelog
+
+
 
 ## 1.0.52
 
