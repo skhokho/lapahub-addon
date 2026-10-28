@@ -783,6 +783,7 @@ class LapaHubAddon:
                 automation = {
                     "entity_id": entity_id,
                     "friendly_name": attributes.get("friendly_name", entity_id),
+                    "config_id": attributes.get("id"),
                     "state": state.get("state"),  # on/off
                     "last_triggered": attributes.get("last_triggered"),
                     "mode": attributes.get("mode"),
