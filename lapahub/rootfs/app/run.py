@@ -840,6 +840,7 @@ class LapaHubAddon:
                             # Config is nested under result.config
                             config = response["result"].get("config", response["result"])
                             automation["config_id"] = config.get("id")
+                            automation["observed_config"] = config
                             # Convert HA config format to LapaHub format
                             # HA uses plural keys: triggers, conditions, actions (or singular for older format)
                             triggers = config.get("triggers") or config.get("trigger", [])
