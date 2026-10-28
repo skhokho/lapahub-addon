@@ -168,3 +168,32 @@ class ManagedSceneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dict(self.addon.command_journal.pending()), {
             'create': 'service_accepted', 'edit': 'service_accepted',
             'run': 'service_accepted', 'delete': 'service_accepted'})
+
+    async def test_delete_wins_restore_lock_race_and_scene_is_never_recreated(self):
+        await self.addon.create_scene('office', entities=self.definition)
+        self.addon.call_ha_service.reset_mock()
+        await self.addon.scene_lock.acquire()
+        deletion=asyncio.create_task(self.addon.delete_scene('scene.lapahub_office'))
+        await asyncio.sleep(0)
+        restoration=asyncio.create_task(self.addon.restore_managed_scenes([{'entity_id':'light.office'}]))
+        await asyncio.sleep(0)
+        self.addon.scene_lock.release()
+        await asyncio.gather(deletion,restoration)
+        self.addon.call_ha_service.assert_awaited_once_with('scene','delete',{'entity_id':'scene.lapahub_office'})
+        self.assertEqual(self.addon.managed_scenes.active(),{})
+
+    async def test_restore_wins_lock_then_delete_suppresses_every_later_restore(self):
+        await self.addon.create_scene('office', entities=self.definition)
+        self.addon.call_ha_service.reset_mock()
+        entered=asyncio.Event();release=asyncio.Event()
+        async def call(domain,service,data):
+            if service=='create':entered.set();await release.wait()
+            return True
+        self.addon.call_ha_service.side_effect=call
+        restoration=asyncio.create_task(self.addon.restore_managed_scenes([{'entity_id':'light.office'}]))
+        await entered.wait()
+        deletion=asyncio.create_task(self.addon.delete_scene('scene.lapahub_office'))
+        release.set();await asyncio.gather(restoration,deletion)
+        await self.addon.restore_managed_scenes([{'entity_id':'light.office'}])
+        self.assertEqual([call.args[1] for call in self.addon.call_ha_service.await_args_list],['create','delete'])
+        self.assertEqual(self.addon.managed_scenes.active(),{})

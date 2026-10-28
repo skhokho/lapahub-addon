@@ -32,6 +32,7 @@ class AutomationConfigTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addon = actual_type()()
         self.addon.automation_refresh_wake = asyncio.Event()
+        self.addon.scene_restore_requested = asyncio.Event()
         self.addon.command_journal = CommandJournal(Path(self.tmp.name) / 'journal.sqlite')
         self.response = SimpleNamespace(status=200, json=AsyncMock(return_value={'result': 'ok'}))
         self.context = Mock()
@@ -95,6 +96,17 @@ class AutomationConfigTests(unittest.IsolatedAsyncioTestCase):
     async def test_manual_trigger_does_not_bypass_conditions(self):
         await self.addon.execute_command({'id': 'trigger', 'action': 'automation.trigger', 'params': {'entity_id': 'automation.lapahub_office'}})
         self.addon.call_ha_service.assert_awaited_once_with('automation', 'trigger', {'entity_id': 'automation.lapahub_office', 'skip_condition': False})
+
+    async def test_imported_large_config_is_not_uploaded_as_raw_observation(self):
+        config={'id':'external_ha_config','alias':'Imported','variables':{'large':'x'*1400000},'triggers':[],'conditions':[],'actions':[]}
+        ws=SimpleNamespace(receive_json=AsyncMock(side_effect=[{'type':'auth_required'},{'type':'auth_ok'},{'success':True,'result':{'config':config}}]),send_json=AsyncMock())
+        context=Mock();context.__aenter__=AsyncMock(return_value=ws);context.__aexit__=AsyncMock(return_value=False)
+        self.addon.session.ws_connect=Mock(return_value=context)
+        for name in ['convert_ha_triggers','convert_ha_conditions','convert_ha_actions']:setattr(self.addon,name,lambda value:value)
+        result=await self.addon.enrich_automation_configs([{'entity_id':'automation.imported'}])
+        self.assertEqual(result[0]['config_id'],'external_ha_config')
+        self.assertNotIn('observed_config',result[0])
+        self.assertEqual(result[0]['actions'],[])
 
 if __name__ == '__main__':
     unittest.main()

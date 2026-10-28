@@ -1,3 +1,7 @@
+# 1.0.58 — Home Assistant recovery pacing
+
+Pace every WebSocket reconnect with bounded backoff, resetting after a healthy authenticated connection. Wake the existing bounded worker after authenticated connect or HA start to restore only missing, unsuppressed managed scene definitions; never activate scenes. Keep raw observed automation config uploads limited to LapaHub configuration IDs.
+
 # 1.0.57 — Private configuration logging
 
 Remove raw automation configuration and authentication/SSE response bodies from logs. Preserve bounded status diagnostics and command receipt correlation.

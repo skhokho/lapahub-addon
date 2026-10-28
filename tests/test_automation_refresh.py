@@ -11,6 +11,7 @@ class AutomationRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.addon = actual_type()()
         self.addon.running = True
         self.addon.automation_refresh_wake = asyncio.Event()
+        self.addon.scene_restore_requested = asyncio.Event()
         self.addon.call_ha_service = AsyncMock(side_effect=AssertionError('physical service forbidden'))
         self.addon.restore_managed_scenes = AsyncMock(side_effect=AssertionError('scene restoration forbidden'))
         self.addon.push_scenes_to_cloud = AsyncMock()

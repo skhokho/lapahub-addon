@@ -171,6 +171,7 @@ class LapaHubAddon:
         self.managed_scenes = ManagedScenes("/data/managed_scenes.sqlite3")
         self.scene_lock = asyncio.Lock()
         self.automation_refresh_wake = asyncio.Event()
+        self.scene_restore_requested = asyncio.Event()
         self.state_publisher = StatePublisher(self.push_state_change_to_cloud)
         self.running = True
         self.shutting_down = False
@@ -443,37 +444,45 @@ class LapaHubAddon:
     # ==================== LAPA-74: WebSocket Real-time Updates ====================
 
     async def ha_websocket_loop(self):
-        """Maintain WebSocket connection to Home Assistant for real-time updates."""
+        """Pace every disconnect, including caught handshake/auth failures."""
         logger.info("Starting Home Assistant WebSocket loop")
-
+        delay = 2
         while self.running:
+            healthy = False
             try:
-                await self.connect_ha_websocket()
+                healthy = await self.connect_ha_websocket()
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
-                self.log_activity(f"WebSocket error: {e}", "error")
-                await asyncio.sleep(10)  # Wait before reconnecting
+            except Exception:
+                self.log_activity("WebSocket connection unavailable", "warning")
+            if not self.running:
+                return
+            if healthy:
+                delay = 2
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
 
     async def connect_ha_websocket(self):
-        """Connect to Home Assistant WebSocket API."""
+        """Connect and report whether authentication stayed healthy for 30 seconds."""
         ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
 
+        authenticated_at = None
         try:
-            self.ha_websocket = await self.session.ws_connect(ws_url)
+            self.ha_websocket = await asyncio.wait_for(self.session.ws_connect(ws_url), timeout=10)
             self.log_activity("Connected to Home Assistant WebSocket")
 
-            # Authenticate
-            auth_msg = await self.ha_websocket.receive_json()
-            if auth_msg.get("type") == "auth_required":
-                await self.ha_websocket.send_json({
-                    "type": "auth",
-                    "access_token": SUPERVISOR_TOKEN,
-                })
-                auth_result = await self.ha_websocket.receive_json()
-                if auth_result.get("type") != "auth_ok":
-                    raise Exception(f"WebSocket auth failed: {auth_result}")
-                self.log_activity("WebSocket authenticated")
+            # Never subscribe or restore on an unexpected/failed auth greeting.
+            auth_msg = await asyncio.wait_for(self.ha_websocket.receive_json(), timeout=10)
+            if auth_msg.get("type") != "auth_required":
+                raise RuntimeError("Unexpected Home Assistant authentication greeting")
+            await self.ha_websocket.send_json({"type": "auth", "access_token": SUPERVISOR_TOKEN})
+            auth_result = await asyncio.wait_for(self.ha_websocket.receive_json(), timeout=10)
+            if auth_result.get("type") != "auth_ok":
+                raise RuntimeError("Home Assistant WebSocket authentication rejected")
+            authenticated_at = asyncio.get_running_loop().time()
+            self.log_activity("WebSocket authenticated")
+            self.scene_restore_requested.set()
+            self.automation_refresh_wake.set()
 
             # Fetch Energy Dashboard preferences on connect
             await self.fetch_energy_prefs()
@@ -505,9 +514,14 @@ class LapaHubAddon:
         except Exception as e:
             self.log_activity(f"WebSocket connection error: {e}", "warning")
         finally:
-            if self.ha_websocket and not self.ha_websocket.closed:
-                await self.ha_websocket.close()
-            self.ha_websocket = None
+            try:
+                if self.ha_websocket and not self.ha_websocket.closed:
+                    await asyncio.wait_for(self.ha_websocket.close(), timeout=5)
+            except Exception:
+                self.log_activity("WebSocket close did not complete cleanly", "warning")
+            finally:
+                self.ha_websocket = None
+        return authenticated_at is not None and asyncio.get_running_loop().time() - authenticated_at >= 30
 
     async def handle_ws_message(self, data: dict):
         """Handle incoming WebSocket message from Home Assistant."""
@@ -520,6 +534,8 @@ class LapaHubAddon:
             if event_type == "state_changed":
                 await self.handle_state_change(event.get("data", {}))
             elif event_type == "homeassistant_started":
+                self.scene_restore_requested.set()
+                self.automation_refresh_wake.set()
                 # HA restarted - refresh energy dashboard config
                 logger.info("Home Assistant started - refreshing Energy Dashboard config")
                 self.log_activity("HA restarted - refreshing config")
@@ -743,7 +759,7 @@ class LapaHubAddon:
     async def automation_refresh_loop(self):
         """One coalescing worker observes async reloads without delaying receipts.
 
-        Five read-only passes per wake burst; slow/offline HA cannot accumulate
+        Five observation/restoration passes per wake burst; slow/offline HA cannot accumulate
         command tasks. Periodic sync remains the fallback after the bounded window.
         """
         while self.running:
@@ -768,8 +784,18 @@ class LapaHubAddon:
                     logger.warning("Prompt automation binding refresh unavailable; retry window is bounded", exc_info=True)
 
     async def refresh_automation_bindings(self):
-        """Observe runtime entity/config identity only; never restore or activate scenes."""
-        states = await self.get_ha_states()
+        """Refresh bindings and requested missing scene definitions; never activate."""
+        restore_requested = self.scene_restore_requested.is_set()
+        if restore_requested:
+            self.scene_restore_requested.clear()
+        try:
+            states = await self.get_ha_states()
+            if restore_requested and (not states or not await self.restore_managed_scenes(states)):
+                self.scene_restore_requested.set()
+        except (Exception, asyncio.CancelledError):
+            if restore_requested:
+                self.scene_restore_requested.set()
+            raise
         if not states:
             return
         automations = []
@@ -885,7 +911,8 @@ class LapaHubAddon:
                             # Config is nested under result.config
                             config = response["result"].get("config", response["result"])
                             automation["config_id"] = config.get("id")
-                            automation["observed_config"] = config
+                            if isinstance(config.get("id"), str) and config["id"].startswith("lapahub_"):
+                                automation["observed_config"] = config
                             # Convert HA config format to LapaHub format
                             # HA uses plural keys: triggers, conditions, actions (or singular for older format)
                             triggers = config.get("triggers") or config.get("trigger", [])
@@ -1146,12 +1173,15 @@ class LapaHubAddon:
     async def restore_managed_scenes(self, states):
         """Restore missing definitions after HA reload/restart. Never activate them."""
         present = {state.get("entity_id") for state in states}
+        restored = True
         async with self.scene_lock:
             for entity_id, definition in self.managed_scenes.active().items():
                 if entity_id not in present:
                     accepted = await self.call_ha_service("scene", "create", definition)
                     if not accepted:
+                        restored = False
                         logger.warning("Managed scene definition could not be restored: %s", entity_id)
+        return restored
 
     async def trigger_scene(self, entity_id: str, expires_at=None) -> bool:
         """Ensure a managed definition exists, then dispatch one activation."""
