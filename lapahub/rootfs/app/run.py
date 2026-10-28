@@ -24,6 +24,7 @@ import aiohttp
 from aiohttp import web
 from reliability import CommandExpired, CommandJournal, StatePublisher, check_command_deadline
 from managed_scenes import ManagedScenes
+from energy_payload import EnergyDeliveryError, collect_energy_payload
 
 # Configure logging
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").upper()
@@ -2050,7 +2051,6 @@ class LapaHubAddon:
         while self.running:
             try:
                 await self.report_energy()
-                self.last_energy_report = datetime.now(timezone.utc)
                 consecutive_errors = 0  # Reset on success
             except asyncio.CancelledError:
                 raise
@@ -2069,260 +2069,42 @@ class LapaHubAddon:
 
     async def report_energy(self):
         """Collect and report energy data using HA Energy Dashboard config."""
-        # Refresh energy prefs periodically (every 5 minutes or if not loaded)
-        should_refresh = (
-            not self.energy_prefs or
-            not self.energy_prefs_last_fetch or
-            (datetime.now(timezone.utc) - self.energy_prefs_last_fetch) > timedelta(minutes=5)
-        )
-        if should_refresh:
-            await self.fetch_energy_prefs()
-
-        states = await self.get_ha_states()
-
-        if not states:
-            return
-
-        # Build state lookup for fast access - handle both entity_id and stat_id formats
-        state_lookup = {}
-        for s in states:
-            entity_id = s.get("entity_id", "")
-            state_lookup[entity_id] = s
-            # Also index without "sensor." prefix for stat_id matching
-            if entity_id.startswith("sensor."):
-                state_lookup[entity_id[7:]] = s
-
-        energy_data = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "sensors": {},
-            "dashboard_sources": {},  # Mapped from HA Energy Dashboard
-        }
-
-        # Debug: log energy_prefs status
-        logger.info(f"energy_prefs status: exists={self.energy_prefs is not None}, "
-                    f"last_fetch={self.energy_prefs_last_fetch}")
-        if self.energy_prefs:
-            logger.info(f"energy_prefs keys: {list(self.energy_prefs.keys())}")
-
-        # If we have Energy Dashboard preferences, use those sensors explicitly
-        if self.energy_prefs:
-            sources = self.energy_prefs.get("energy_sources", [])
-            logger.info(f"Processing {len(sources)} energy sources from dashboard config")
-
-            # Debug: log first few state_lookup keys
-            sample_keys = list(state_lookup.keys())[:10]
-            logger.info(f"Sample state_lookup keys: {sample_keys}")
-
-            for source in sources:
-                source_type = source.get("type")
-
-                # Handle grid sources specially - they use flow_from/flow_to/power structure
-                if source_type == "grid":
-                    power_sensor = None  # Initialize before use
-                    # Log the full grid source config for debugging
-                    logger.info(f"Grid source config: {json.dumps(source, default=str)}")
-
-                    # Grid has flow_from (import) and flow_to (export) as arrays
-                    # and optionally a direct "power" sensor (which is also a list of objects)
-                    power_config = source.get("power")
-                    if power_config:
-                        logger.info(f"Grid power config: {power_config}")
-                        # power is a list of objects with stat_rate field
-                        if isinstance(power_config, list):
-                            for power_item in power_config:
-                                power_sensor = power_item.get("stat_rate") if isinstance(power_item, dict) else None
-                                if power_sensor and power_sensor in state_lookup:
-                                    state = state_lookup[power_sensor]
-                                    state_value = state.get("state", "")
-                                    if state_value not in ("unknown", "unavailable", ""):
-                                        energy_data["dashboard_sources"][power_sensor] = {
-                                            "type": "grid",
-                                            "value": float(state_value),
-                                            "unit": state.get("attributes", {}).get("unit_of_measurement"),
-                                            "friendly_name": state.get("attributes", {}).get("friendly_name"),
-                                            "is_power_sensor": True,
-                                        }
-                                        logger.info(f"Found grid power sensor: {power_sensor} = {state_value}")
-                        elif isinstance(power_config, str) and power_config in state_lookup:
-                            # Handle case where power is a simple string (older format)
-                            state = state_lookup[power_config]
-                            state_value = state.get("state", "")
-                            if state_value not in ("unknown", "unavailable", ""):
-                                energy_data["dashboard_sources"][power_config] = {
-                                    "type": "grid",
-                                    "value": float(state_value),
-                                    "unit": state.get("attributes", {}).get("unit_of_measurement"),
-                                    "friendly_name": state.get("attributes", {}).get("friendly_name"),
-                                    "is_power_sensor": True,
-                                }
-                                logger.info(f"Found grid power sensor: {power_config} = {state_value}")
-
-                    # Process flow_from (grid import) entries
-                    flow_from = source.get("flow_from", [])
-                    for flow in flow_from:
-                        stat_id = flow.get("stat_energy_from")
-                        if stat_id and stat_id in state_lookup:
-                            state = state_lookup[stat_id]
-                            try:
-                                state_value = state.get("state", "")
-                                if state_value not in ("unknown", "unavailable", ""):
-                                    energy_data["dashboard_sources"][stat_id] = {
-                                        "type": "grid",
-                                        "subtype": "import",
-                                        "value": float(state_value),
-                                        "unit": state.get("attributes", {}).get("unit_of_measurement"),
-                                        "friendly_name": state.get("attributes", {}).get("friendly_name"),
-                                    }
-                                    logger.info(f"Found grid import sensor: {stat_id}")
-                            except (ValueError, TypeError):
-                                pass
-
-                    # Process flow_to (grid export) entries
-                    flow_to = source.get("flow_to", [])
-                    for flow in flow_to:
-                        stat_id = flow.get("stat_energy_to")
-                        if stat_id and stat_id in state_lookup:
-                            state = state_lookup[stat_id]
-                            try:
-                                state_value = state.get("state", "")
-                                if state_value not in ("unknown", "unavailable", ""):
-                                    energy_data["dashboard_sources"][stat_id] = {
-                                        "type": "grid",
-                                        "subtype": "export",
-                                        "value": float(state_value),
-                                        "unit": state.get("attributes", {}).get("unit_of_measurement"),
-                                        "friendly_name": state.get("attributes", {}).get("friendly_name"),
-                                    }
-                                    logger.info(f"Found grid export sensor: {stat_id}")
-                            except (ValueError, TypeError):
-                                pass
-
-                    logger.info(f"Energy source: type=grid, power={power_sensor}, flow_from={len(flow_from)}, flow_to={len(flow_to)}")
-                    continue
-
-                # For non-grid sources, try multiple stat_id fields
-                stat_id = (
-                    source.get("stat_energy_from") or
-                    source.get("stat_energy_to") or
-                    source.get("entity_id") or
-                    source.get("stat_compensation")
-                )
-
-                logger.info(f"Energy source: type={source_type}, stat_id={stat_id}, source_keys={list(source.keys())}")
-
-                if not stat_id:
-                    continue
-
-                # Try to find the state - handle various stat_id formats
-                state = None
-                # Direct lookup
-                if stat_id in state_lookup:
-                    state = state_lookup[stat_id]
-                    logger.info(f"Found {stat_id} via direct lookup")
-                # Try with sensor. prefix
-                elif f"sensor.{stat_id}" in state_lookup:
-                    state = state_lookup[f"sensor.{stat_id}"]
-                    logger.info(f"Found {stat_id} via sensor. prefix")
-                # Try stripping recorder: prefix
-                elif stat_id.startswith("recorder:"):
-                    clean_id = stat_id.replace("recorder:", "")
-                    if clean_id in state_lookup:
-                        state = state_lookup[clean_id]
-                        logger.info(f"Found {stat_id} via recorder: strip")
-                else:
-                    logger.warning(f"Could not find {stat_id} in state_lookup")
-
-                if state:
-                    try:
-                        state_value = state.get("state", "")
-                        if state_value not in ("unknown", "unavailable", ""):
-                            value = float(state_value)
-                            energy_data["dashboard_sources"][stat_id] = {
-                                "type": source_type,  # solar, grid, battery, gas
-                                "value": value,
-                                "unit": state.get("attributes", {}).get("unit_of_measurement"),
-                                "friendly_name": state.get("attributes", {}).get("friendly_name"),
-                            }
-                    except (ValueError, TypeError) as e:
-                        logger.debug(f"Could not parse {stat_id}: {e}")
-                else:
-                    logger.debug(f"Energy source {stat_id} not found in states")
-
-            # Also check for device consumption sensors
-            device_consumption = self.energy_prefs.get("device_consumption", [])
-            for device in device_consumption:
-                stat_id = device.get("stat_consumption")
-                if stat_id and stat_id in state_lookup:
-                    state = state_lookup[stat_id]
-                    try:
-                        state_value = state.get("state", "")
-                        if state_value not in ("unknown", "unavailable", ""):
-                            value = float(state_value)
-                            energy_data["dashboard_sources"][stat_id] = {
-                                "type": "device",
-                                "value": value,
-                                "unit": state.get("attributes", {}).get("unit_of_measurement"),
-                                "friendly_name": state.get("attributes", {}).get("friendly_name"),
-                            }
-                    except (ValueError, TypeError):
-                        pass
-
-            if energy_data["dashboard_sources"]:
-                logger.info(f"Using {len(energy_data['dashboard_sources'])} Energy Dashboard sources")
-            elif sources:
-                logger.warning(f"Energy Dashboard has {len(sources)} sources but none matched current states")
-
-        # Also collect all energy-related sensors as backup (for pattern matching fallback)
-        energy_classes = ["energy", "power", "voltage", "current", "battery"]
-
-        for state in states:
-            entity_id = state.get("entity_id", "")
-            if not entity_id.startswith("sensor."):
-                continue
-
-            attributes = state.get("attributes", {})
-            device_class = attributes.get("device_class")
-
-            if device_class in energy_classes:
-                try:
-                    state_value = state.get("state", "")
-                    if state_value not in ("unknown", "unavailable", ""):
-                        value = float(state_value)
-                        energy_data["sensors"][entity_id] = {
-                            "value": value,
-                            "unit": attributes.get("unit_of_measurement"),
-                            "device_class": device_class,
-                            "friendly_name": attributes.get("friendly_name"),
-                        }
-                except (ValueError, TypeError):
-                    pass
-
-        source_count = len(energy_data.get("dashboard_sources", {}))
-        sensor_count = len(energy_data.get("sensors", {}))
-        logger.info(f"Collected {source_count} dashboard sources, {sensor_count} sensors")
-        await self.push_energy_to_cloud(energy_data)
+        # Retry the exact snapshot first: a delivery failure must not relabel old
+        # measurements with a new observation time or silently discard them.
+        pending = getattr(self, "pending_energy_report", None)
+        if pending is None:
+            if (not self.energy_prefs_last_fetch or
+                    datetime.now(timezone.utc) - self.energy_prefs_last_fetch > timedelta(minutes=5)):
+                await self.fetch_energy_prefs()
+            states = await self.get_ha_states()
+            if not states:
+                raise RuntimeError("No Home Assistant states available for energy report")
+            pending = collect_energy_payload(states, self.energy_prefs or {})
+            self.pending_energy_report = pending
+        try:
+            await self.push_energy_to_cloud(pending)
+        except EnergyDeliveryError as error:
+            if error.permanent:
+                logger.error("Discarding permanently rejected energy snapshot: %s", error)
+                self.pending_energy_report = None
+            raise
+        self.last_energy_report = datetime.fromisoformat(pending["timestamp"])
+        self.pending_energy_report = None
 
     async def push_energy_to_cloud(self, energy_data: dict):
         """Push energy data to LapaHub cloud."""
-        if not self.firebase_credentials:
-            logger.debug("Skipping energy push (no credentials)")
-            return
-
+        if not self.firebase_credentials or not self.firebase_credentials.get("token"):
+            raise RuntimeError("Energy push requires authenticated credentials")
         api_url = f"https://us-central1-{self.firebase_project}.cloudfunctions.net/reportEnergy"
-
-        try:
-            async with self.session.post(
-                api_url,
-                json={"hubId": self.hub_id, **energy_data},
-                headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
-                if resp.status == 200:
-                    logger.debug("Energy data pushed to cloud")
-                else:
-                    logger.warning(f"Energy push failed: {resp.status}")
-        except Exception as e:
-            logger.warning(f"Could not push energy data: {e}")
+        async with self.session.post(
+            api_url,
+            json={"hubId": self.hub_id, **energy_data},
+            headers={"Authorization": f"Bearer {self.firebase_credentials['token']}"},
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as resp:
+            if resp.status != 200:
+                raise EnergyDeliveryError(resp.status)
+            logger.debug("Energy data pushed to cloud")
 
     async def run_web_server(self):
         """Run the ingress web interface."""
