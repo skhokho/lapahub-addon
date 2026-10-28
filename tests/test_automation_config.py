@@ -16,7 +16,7 @@ from reliability import CommandExpired, CommandJournal, check_command_deadline
 def actual_type():
     source = Path(__file__).resolve().parents[1] / 'lapahub/rootfs/app/run.py'
     addon = next(n for n in ast.parse(source.read_text()).body if isinstance(n, ast.ClassDef) and n.name == 'LapaHubAddon')
-    names = {'_write_automation_config', 'create_automation', 'delete_automation', 'execute_command', '_execute_command_once', 'enrich_automation_configs'}
+    names = {'_write_automation_config', 'create_automation', 'delete_automation', 'execute_command', '_execute_command_once', 'enrich_automation_configs', 'automation_refresh_loop', 'refresh_automation_bindings'}
     methods = [n for n in addon.body if isinstance(n, ast.AsyncFunctionDef) and n.name in names]
     ns = dict(asyncio=asyncio, logger=logging.getLogger('automation-test'), datetime=datetime, timezone=timezone,
               CommandExpired=CommandExpired, check_command_deadline=check_command_deadline,
@@ -31,6 +31,7 @@ class AutomationConfigTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addon = actual_type()()
+        self.addon.automation_refresh_wake = asyncio.Event()
         self.addon.command_journal = CommandJournal(Path(self.tmp.name) / 'journal.sqlite')
         self.response = SimpleNamespace(status=200, json=AsyncMock(return_value={'result': 'ok'}))
         self.context = Mock()
@@ -44,6 +45,7 @@ class AutomationConfigTests(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
     async def test_create_and_delete_use_official_rest_contract(self):
         self.assertTrue(await self.addon.create_automation('lapahub_office', {'alias': 'Office'}))
+        self.assertTrue(self.addon.automation_refresh_wake.is_set())
         args, kw = self.addon.session.post.call_args
         self.assertEqual(args, ('http://supervisor/core/api/config/automation/config/lapahub_office',))
         self.assertEqual(kw['json'], {'alias': 'Office'})
@@ -53,6 +55,7 @@ class AutomationConfigTests(unittest.IsolatedAsyncioTestCase):
     async def test_http_success_without_config_acceptance_is_not_success(self):
         self.response.json.return_value = {'success': True}
         self.assertFalse(await self.addon.create_automation('lapahub_office', {}))
+        self.assertFalse(self.addon.automation_refresh_wake.is_set())
         self.response.status = 403
         self.assertFalse(await self.addon.delete_automation('lapahub_office'))
     async def test_imported_or_path_ids_are_rejected_before_network(self):

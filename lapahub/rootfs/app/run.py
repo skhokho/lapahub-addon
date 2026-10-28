@@ -169,6 +169,7 @@ class LapaHubAddon:
         self.command_journal = CommandJournal("/data/command_journal.sqlite3")
         self.managed_scenes = ManagedScenes("/data/managed_scenes.sqlite3")
         self.scene_lock = asyncio.Lock()
+        self.automation_refresh_wake = asyncio.Event()
         self.state_publisher = StatePublisher(self.push_state_change_to_cloud)
         self.running = True
         self.shutting_down = False
@@ -300,6 +301,7 @@ class LapaHubAddon:
                 self.token_refresh_loop(),
                 self.ha_websocket_loop(),      # LAPA-74: Real-time state updates
                 self.heartbeat_loop(),          # LAPA-75: Health heartbeat
+                self.automation_refresh_loop(),
                 self.scene_sync_loop(),         # LAPA-78: Sync scenes/automations
                 self.run_web_server(),
             ]
@@ -738,6 +740,52 @@ class LapaHubAddon:
 
     # ==================== LAPA-78: Scenes and Automations ====================
 
+    async def automation_refresh_loop(self):
+        """One coalescing worker observes async reloads without delaying receipts.
+
+        Five read-only passes per wake burst; slow/offline HA cannot accumulate
+        command tasks. Periodic sync remains the fallback after the bounded window.
+        """
+        while self.running:
+            await self.automation_refresh_wake.wait()
+            if not self.running:
+                return
+            self.automation_refresh_wake.clear()
+            for delay in (0, 1, 2, 4, 8):
+                if delay:
+                    try:
+                        await asyncio.wait_for(self.automation_refresh_wake.wait(), timeout=delay)
+                        self.automation_refresh_wake.clear()
+                    except asyncio.TimeoutError:
+                        pass
+                if not self.running:
+                    return
+                try:
+                    await asyncio.wait_for(self.refresh_automation_bindings(), timeout=8)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("Prompt automation binding refresh unavailable; retry window is bounded", exc_info=True)
+
+    async def refresh_automation_bindings(self):
+        """Observe runtime entity/config identity only; never restore or activate scenes."""
+        states = await self.get_ha_states()
+        if not states:
+            return
+        automations = []
+        for state in states:
+            entity_id = state.get("entity_id", "")
+            if not entity_id.startswith("automation."):
+                continue
+            attributes = state.get("attributes", {})
+            automations.append({"entity_id": entity_id,
+                "friendly_name": attributes.get("friendly_name", entity_id),
+                "state": state.get("state"), "last_triggered": attributes.get("last_triggered"),
+                "mode": attributes.get("mode")})
+        if automations:
+            automations = await self.enrich_automation_configs(automations)
+            await self.push_scenes_to_cloud([], automations)
+
     async def scene_sync_loop(self):
         """Periodically sync scenes and automations from HA to cloud."""
         logger.info("Starting scene/automation sync loop")
@@ -1155,7 +1203,10 @@ class LapaHubAddon:
                     logger.error("HA automation config rejected (%s)", resp.status)
                     return False
                 result = await resp.json()
-                return isinstance(result, dict) and result.get("result") == "ok"
+                accepted = isinstance(result, dict) and result.get("result") == "ok"
+                if accepted:
+                    self.automation_refresh_wake.set()
+                return accepted
         except asyncio.CancelledError:
             raise
         except Exception:
