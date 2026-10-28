@@ -83,6 +83,8 @@ class AutomationConfigTests(unittest.IsolatedAsyncioTestCase):
             setattr(self.addon, name, lambda value: value)
         result = await self.addon.enrich_automation_configs([{'entity_id': 'automation.office_alias'}])
         self.assertEqual(result[0]['config_id'], 'lapahub_uuid')
+        self.assertEqual(result[0]['observed_config']['id'], 'lapahub_uuid')
+        self.assertEqual(result[0]['observed_config']['actions'], [])
         self.assertEqual(result[0]['entity_id'], 'automation.office_alias')
         self.addon.session.ws_connect.assert_called_once_with('ws://supervisor/core/api/websocket')
         self.assertEqual(ws.send_json.await_args_list[1].args[0], {'id': 1, 'type': 'automation/config', 'entity_id': 'automation.office_alias'})
