@@ -455,7 +455,7 @@ class LapaHubAddon:
 
     async def connect_ha_websocket(self):
         """Connect to Home Assistant WebSocket API."""
-        ws_url = "ws://supervisor/core/websocket"
+        ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
 
         try:
             self.ha_websocket = await self.session.ws_connect(ws_url)
@@ -783,7 +783,6 @@ class LapaHubAddon:
                 automation = {
                     "entity_id": entity_id,
                     "friendly_name": attributes.get("friendly_name", entity_id),
-                    "config_id": attributes.get("id"),
                     "state": state.get("state"),  # on/off
                     "last_triggered": attributes.get("last_triggered"),
                     "mode": attributes.get("mode"),
@@ -803,7 +802,7 @@ class LapaHubAddon:
         """Fetch full automation configs from HA via WebSocket API."""
         logger.info(f"Fetching automation configs for {len(automations)} automations")
         try:
-            ws_url = "ws://supervisor/core/websocket"
+            ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
 
             async with self.session.ws_connect(ws_url) as ws:
                 # Auth sequence
@@ -840,6 +839,7 @@ class LapaHubAddon:
                         if response.get("success") and response.get("result"):
                             # Config is nested under result.config
                             config = response["result"].get("config", response["result"])
+                            automation["config_id"] = config.get("id")
                             # Convert HA config format to LapaHub format
                             # HA uses plural keys: triggers, conditions, actions (or singular for older format)
                             triggers = config.get("triggers") or config.get("trigger", [])
