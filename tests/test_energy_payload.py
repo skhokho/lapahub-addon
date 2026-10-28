@@ -43,6 +43,7 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(entry['observed_at'], NOW.isoformat())
         self.assertEqual(entry['state_updated_at'], '2020-01-01T00:00:00+00:00')
         self.assertEqual(report['timestamp'], NOW.isoformat())
+        self.assertEqual(report['energy_payload_version'], 2)
 
     def test_supported_units_explicit_and_no_missing_power_synthesized(self):
         for unit in ('W', 'kW', 'MW'):
@@ -84,12 +85,14 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             await addon.report_energy()
         self.assertIsNone(addon.last_energy_report)
         pending = addon.pending_energy_report
+        self.assertEqual(pending['energy_payload_version'], 2)
         await addon.report_energy()
         addon.get_ha_states.assert_awaited_once()
         self.assertIs(addon.push_energy_to_cloud.await_args_list[0].args[0], pending)
         self.assertIs(addon.push_energy_to_cloud.await_args_list[1].args[0], pending)
         self.assertEqual(addon.last_energy_report.isoformat(), pending['timestamp'])
         self.assertIsNone(addon.pending_energy_report)
+        self.assertEqual(addon.push_energy_to_cloud.await_args_list[1].args[0]['energy_payload_version'], 2)
 
     async def test_permanent_rejection_discards_but_transient_retains(self):
         for status in (400, 401, 403, 409, 422, 408, 429, 503):

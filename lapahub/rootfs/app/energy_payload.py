@@ -26,7 +26,8 @@ def collect_energy_payload(states, preferences, fetched_at=None):
     timestamp = fetched_at or datetime.now(timezone.utc)
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
         raise ValueError("Energy observation time requires a timezone")
-    payload = {"timestamp": timestamp.isoformat(), "sensors": {}, "dashboard_sources": {}}
+    payload = {"energy_payload_version": 2, "timestamp": timestamp.isoformat(),
+               "sensors": {}, "dashboard_sources": {}}
     lookup = {}
     for state in states:
         entity = state.get("entity_id", "")
