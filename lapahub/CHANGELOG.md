@@ -1,3 +1,9 @@
+# 1.0.56 — Pinned Supervisor architecture selection
+
+- Replace deprecated build.yaml with Dockerfile architecture stages and immutable base-image pins.
+- Select the supported architecture through BUILD_ARCH; Supervisor BUILD_FROM overrides cannot select latest.
+- Preserve the addon slug, options, databases and Python behavior.
+
 # 1.0.55 — Supervisor build compatibility
 
 - Declare verified architecture-specific Alpine 3.22 base images with immutable digest pins.

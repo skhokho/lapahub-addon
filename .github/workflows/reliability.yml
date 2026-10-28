@@ -15,6 +15,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Verify Supervisor BUILD_FROM cannot override the pinned base
+        run: docker build --pull --target pinned-base --build-arg BUILD_ARCH=amd64 --build-arg BUILD_FROM=ghcr.io/home-assistant/base:latest --tag lapahub-addon:pinned-base lapahub
       - name: Build without BUILD_FROM like the failing Supervisor invocation
         run: docker build --pull --build-arg BUILD_ARCH=amd64 --tag lapahub-addon:smoke lapahub
       - name: Verify runtime imports, version fallback and private-database persistence
