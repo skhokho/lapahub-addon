@@ -1,24 +1,19 @@
-ARG BUILD_FROM
+# amd64/arm64 fallback also supports Supervisor invocations without BUILD_FROM.
+ARG BUILD_FROM=ghcr.io/home-assistant/base:3.22@sha256:4abe1e6f72ad026f6e654a7128900c89da0da1f6aa3de5e647d2bfa8b93c95d9
 FROM $BUILD_FROM
 
-# Install Python and dependencies
+# Use Alpine's matching binary packages; psutil must not need a compiler at install.
+# PyYAML and config.yaml make version reporting work without Supervisor access.
 RUN apk add --no-cache \
     python3 \
-    py3-pip \
     py3-aiohttp \
+    py3-dateutil \
+    py3-psutil \
+    py3-yaml \
     bash
 
-# Copy requirements and install Python packages
-COPY requirements.txt /tmp/
-RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
-
-# Copy application
 COPY rootfs/ /
-
-# Set permissions
+COPY config.yaml /config.yaml
 RUN chmod a+x /app/run.py
-
 WORKDIR /app
-
-# Run the application directly (init: false disables s6-overlay)
 CMD ["python3", "/app/run.py"]

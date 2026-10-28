@@ -1,3 +1,12 @@
+# 1.0.55 — Supervisor build compatibility
+
+- Declare verified architecture-specific Alpine 3.22 base images with immutable digest pins.
+- Provide a pinned multiarch default when Supervisor omits the BUILD_FROM argument.
+- Install matching Alpine Python packages, avoiding native psutil compilation during addon builds.
+- Bundle version metadata and PyYAML for accurate fallback reporting without Supervisor access.
+- Add a real image-build, application import and SQLite persistence smoke gate to cloud CI.
+- Preserve the existing addon slug, options and both private databases; application behavior is unchanged.
+
 # 1.0.54 — Command reliability and state responsiveness
 
 - Durable command receipts prevent duplicate HA dispatch across reconnect/restart.
