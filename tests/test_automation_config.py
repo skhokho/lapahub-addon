@@ -16,7 +16,7 @@ from reliability import CommandExpired, CommandJournal, check_command_deadline
 def actual_type():
     source = Path(__file__).resolve().parents[1] / 'lapahub/rootfs/app/run.py'
     addon = next(n for n in ast.parse(source.read_text()).body if isinstance(n, ast.ClassDef) and n.name == 'LapaHubAddon')
-    names = {'_write_automation_config', 'create_automation', 'delete_automation', 'execute_command', '_execute_command_once'}
+    names = {'_write_automation_config', 'create_automation', 'delete_automation', 'execute_command', '_execute_command_once', 'enrich_automation_configs'}
     methods = [n for n in addon.body if isinstance(n, ast.AsyncFunctionDef) and n.name in names]
     ns = dict(asyncio=asyncio, logger=logging.getLogger('automation-test'), datetime=datetime, timezone=timezone,
               CommandExpired=CommandExpired, check_command_deadline=check_command_deadline,
@@ -72,6 +72,21 @@ class AutomationConfigTests(unittest.IsolatedAsyncioTestCase):
         await self.addon.execute_command(command)
         self.assertEqual(self.addon.command_journal.pending(), [('lost-config', 'unknown')])
         self.addon.session.post.assert_called_once()
+    async def test_runtime_alias_is_bound_to_config_id_from_authenticated_read(self):
+        ws = SimpleNamespace(receive_json=AsyncMock(side_effect=[{'type': 'auth_required'}, {'type': 'auth_ok'},
+            {'success': True, 'result': {'config': {'id': 'lapahub_uuid', 'alias': 'Office', 'triggers': [], 'conditions': [], 'actions': []}}}]), send_json=AsyncMock())
+        context = Mock()
+        context.__aenter__ = AsyncMock(return_value=ws)
+        context.__aexit__ = AsyncMock(return_value=False)
+        self.addon.session.ws_connect = Mock(return_value=context)
+        for name in ['convert_ha_triggers', 'convert_ha_conditions', 'convert_ha_actions']:
+            setattr(self.addon, name, lambda value: value)
+        result = await self.addon.enrich_automation_configs([{'entity_id': 'automation.office_alias'}])
+        self.assertEqual(result[0]['config_id'], 'lapahub_uuid')
+        self.assertEqual(result[0]['entity_id'], 'automation.office_alias')
+        self.addon.session.ws_connect.assert_called_once_with('ws://supervisor/core/api/websocket')
+        self.assertEqual(ws.send_json.await_args_list[1].args[0], {'id': 1, 'type': 'automation/config', 'entity_id': 'automation.office_alias'})
+
     async def test_manual_trigger_does_not_bypass_conditions(self):
         await self.addon.execute_command({'id': 'trigger', 'action': 'automation.trigger', 'params': {'entity_id': 'automation.lapahub_office'}})
         self.addon.call_ha_service.assert_awaited_once_with('automation', 'trigger', {'entity_id': 'automation.lapahub_office', 'skip_condition': False})
