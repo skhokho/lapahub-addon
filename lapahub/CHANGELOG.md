@@ -1,3 +1,7 @@
+# 1.0.57 — Private configuration logging
+
+Remove raw automation configuration and authentication/SSE response bodies from logs. Preserve bounded status diagnostics and command receipt correlation.
+
 # 1.0.56 — Pinned Supervisor architecture selection
 
 - Replace deprecated build.yaml with Dockerfile architecture stages and immutable base-image pins.

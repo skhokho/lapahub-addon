@@ -145,7 +145,7 @@ def get_supervisor_token() -> str | None:
 
 SUPERVISOR_TOKEN = get_supervisor_token()
 if SUPERVISOR_TOKEN:
-    logger.info(f"Supervisor token obtained (length: {len(SUPERVISOR_TOKEN)})")
+    logger.info("Supervisor credentials available")
 else:
     logger.error("No supervisor token - Home Assistant API calls will fail!")
 
@@ -404,8 +404,7 @@ class LapaHubAddon:
                     logger.info(f"Successfully authenticated (token expires at {self.token_expires_at.isoformat()})")
                     return True
                 else:
-                    error = await resp.text()
-                    logger.error(f"Authentication failed ({resp.status}): {error}")
+                    logger.error("Authentication failed (HTTP %s)", resp.status)
                     return False
         except aiohttp.ClientError as e:
             logger.warning(f"Could not reach LapaHub cloud: {e}")
@@ -882,9 +881,6 @@ class LapaHubAddon:
 
                     try:
                         response = await asyncio.wait_for(ws.receive_json(), timeout=5)
-                        # Log first response for debugging
-                        if msg_id == 1:
-                            logger.info(f"First automation config response: {str(response)[:500]}")
                         if response.get("success") and response.get("result"):
                             # Config is nested under result.config
                             config = response["result"].get("config", response["result"])
@@ -1815,8 +1811,8 @@ class LapaHubAddon:
         elif event_type == "heartbeat":
             pass  # Keep-alive, no action needed
         elif event_type == "error":
-            logger.warning(f"SSE: server error: {data_str}")
-            raise Exception(f"SSE server error: {data_str}")
+            logger.warning("SSE: server returned an error event")
+            raise Exception("SSE server returned an error event")
         else:
             logger.debug(f"SSE: unknown event type '{event_type}'")
 
