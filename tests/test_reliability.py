@@ -195,7 +195,7 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
         await self.addon.execute_command({'id': 'scene-delete', 'action': 'scene.delete', 'params': {'entity_id': 'scene.evening'}})
         self.addon.delete_scene.assert_awaited_once_with('scene.evening', expires_at=None)
         await self.addon.execute_command({'id': 'automation-trigger', 'action': 'automation.trigger', 'params': {'entity_id': 'automation.office'}})
-        self.addon.call_ha_service.assert_awaited_once_with('automation', 'trigger', {'entity_id': 'automation.office'})
+        self.addon.call_ha_service.assert_awaited_once_with('automation', 'trigger', {'entity_id': 'automation.office', 'skip_condition': False})
     async def test_root_command_cannot_redirect_entity_through_service_data(self):
         await self.addon.execute_command({**self.command, 'params': {'entity_id': 'light.other'}})
         self.addon.call_ha_service.assert_awaited_once_with('light', 'turn_on', {'entity_id': 'light.office'})

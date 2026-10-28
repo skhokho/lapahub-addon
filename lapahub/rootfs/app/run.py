@@ -1129,108 +1129,46 @@ class LapaHubAddon:
         service = "turn_on" if enable else "turn_off"
         return await self.call_ha_service("automation", service, {"entity_id": entity_id})
 
-    async def create_automation(self, automation_id: str, config: dict) -> bool:
-        """Create or update an automation in Home Assistant via WebSocket.
+    async def _write_automation_config(self, automation_id: str, config=None, expires_at=None) -> bool:
+        """Use HA's admin REST config API; acceptance does not prove reload completion.
 
-        Args:
-            automation_id: The HA automation ID (e.g., 'lapahub_abc123')
-            config: The HA automation config (with alias, trigger, condition, action)
-
-        Returns:
-            True if successful, False otherwise
+        Contract: Home Assistant core 2026.10.4 components/config/{automation,view}.py.
+        Never retry uncertain mutations here: the durable command journal owns replay.
         """
+        if (not isinstance(automation_id, str) or not automation_id.startswith("lapahub_")
+                or len(automation_id) > 160
+                or not all(c in "abcdefghijklmnopqrstuvwxyz0123456789_" for c in automation_id)):
+            raise ValueError("Only explicit LapaHub automation configuration IDs may be changed")
+        check_command_deadline(expires_at)
+        request = self.session.delete if config is None else self.session.post
+        kwargs = {
+            "headers": {"Authorization": f"Bearer {SUPERVISOR_TOKEN}", "Content-Type": "application/json"},
+            "timeout": aiohttp.ClientTimeout(total=30),
+        }
+        if config is not None:
+            kwargs["json"] = config
         try:
-            ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
-            logger.info(f"Creating automation '{automation_id}' via WebSocket")
-
-            async with self.session.ws_connect(ws_url) as ws:
-                # Auth sequence
-                msg = await ws.receive_json()
-                if msg.get("type") != "auth_required":
-                    logger.warning(f"Unexpected WS message: {msg}")
+            async with request(f"{HA_BASE_URL}/api/config/automation/config/{automation_id}", **kwargs) as resp:
+                if resp.status != 200:
+                    logger.error("HA automation config rejected (%s)", resp.status)
                     return False
+                result = await resp.json()
+                return isinstance(result, dict) and result.get("result") == "ok"
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A response can be lost after HA has persisted the configuration.
+            # Preserve uncertainty instead of recording a definitive rejection.
+            logger.exception("HA automation configuration outcome uncertain")
+            raise
 
-                await ws.send_json({
-                    "type": "auth",
-                    "access_token": SUPERVISOR_TOKEN,
-                })
+    async def create_automation(self, automation_id: str, config: dict, expires_at=None) -> bool:
+        """Persist a managed automation; HA schedules its reload asynchronously."""
+        return await self._write_automation_config(automation_id, config, expires_at)
 
-                msg = await ws.receive_json()
-                if msg.get("type") != "auth_ok":
-                    logger.warning(f"WS auth failed: {msg}")
-                    return False
-
-                # Create/update automation config
-                # HA expects the config at config/automation/config/{automation_id}
-                await ws.send_json({
-                    "id": 1,
-                    "type": "automation/config",
-                    "automation_id": automation_id,
-                    "config": config,
-                })
-
-                msg = await ws.receive_json()
-                if msg.get("success"):
-                    logger.info(f"Automation '{automation_id}' created successfully")
-                    self.log_activity(f"Created automation: {config.get('alias', automation_id)}")
-                    return True
-                else:
-                    error = msg.get("error", {}).get("message", "Unknown error")
-                    logger.error(f"Failed to create automation: {error}")
-                    return False
-
-        except Exception as e:
-            logger.error(f"Error creating automation: {e}")
-            return False
-
-    async def delete_automation(self, automation_id: str) -> bool:
-        """Delete an automation from Home Assistant via WebSocket.
-
-        Args:
-            automation_id: The HA automation ID (e.g., 'lapahub_abc123')
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
-            logger.info(f"Deleting automation '{automation_id}' via WebSocket")
-
-            async with self.session.ws_connect(ws_url) as ws:
-                # Auth sequence
-                msg = await ws.receive_json()
-                if msg.get("type") != "auth_required":
-                    return False
-
-                await ws.send_json({
-                    "type": "auth",
-                    "access_token": SUPERVISOR_TOKEN,
-                })
-
-                msg = await ws.receive_json()
-                if msg.get("type") != "auth_ok":
-                    return False
-
-                # Delete automation
-                await ws.send_json({
-                    "id": 1,
-                    "type": "automation/delete",
-                    "automation_id": automation_id,
-                })
-
-                msg = await ws.receive_json()
-                if msg.get("success"):
-                    logger.info(f"Automation '{automation_id}' deleted successfully")
-                    self.log_activity(f"Deleted automation: {automation_id}")
-                    return True
-                else:
-                    error = msg.get("error", {}).get("message", "Unknown error")
-                    logger.error(f"Failed to delete automation: {error}")
-                    return False
-
-        except Exception as e:
-            logger.error(f"Error deleting automation: {e}")
-            return False
+    async def delete_automation(self, automation_id: str, expires_at=None) -> bool:
+        """Delete a managed automation through the same durable REST config API."""
+        return await self._write_automation_config(automation_id, expires_at=expires_at)
 
     async def create_scene(self, scene_id: str, entities: dict = None, snapshot_entities: list = None, scene_name: str = None, expires_at=None) -> bool:
         """Create a dynamic scene and durably retain confirmed explicit states."""
@@ -1902,7 +1840,7 @@ class LapaHubAddon:
             automation_id = params.get("automation_id")
             config = params.get("config", {})
             if automation_id and config:
-                success = await self.create_automation(automation_id, config)
+                success = await self.create_automation(automation_id, config, expires_at=command.get("expires_at"))
             else:
                 logger.error("automation.create requires automation_id and config in params")
 
@@ -1911,7 +1849,7 @@ class LapaHubAddon:
             automation_id = params.get("automation_id")
             config = params.get("config", {})
             if automation_id and config:
-                success = await self.create_automation(automation_id, config)
+                success = await self.create_automation(automation_id, config, expires_at=command.get("expires_at"))
             else:
                 logger.error("automation.update requires automation_id and config in params")
 
@@ -1919,14 +1857,14 @@ class LapaHubAddon:
             # Delete an automation
             automation_id = params.get("automation_id")
             if automation_id:
-                success = await self.delete_automation(automation_id)
+                success = await self.delete_automation(automation_id, expires_at=command.get("expires_at"))
             else:
                 logger.error("automation.delete requires automation_id in params")
 
         elif action == "automation.trigger":
             # Manually trigger an automation
             if entity_id:
-                success = await self.call_ha_service("automation", "trigger", {"entity_id": entity_id})
+                success = await self.call_ha_service("automation", "trigger", {"entity_id": entity_id, "skip_condition": False})
             else:
                 logger.error("automation.trigger requires entity_id")
 
