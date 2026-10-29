@@ -1,0 +1,24 @@
+name: Addon reliability
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install aiohttp==3.13.5
+      - run: python -m unittest discover -s tests -v
+      - run: python -m py_compile lapahub/rootfs/app/run.py lapahub/rootfs/app/reliability.py lapahub/rootfs/app/managed_scenes.py lapahub/rootfs/app/energy_payload.py
+  image-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Supervisor BUILD_FROM cannot override the pinned base
+        run: docker build --pull --target pinned-base --build-arg BUILD_ARCH=amd64 --build-arg BUILD_FROM=ghcr.io/home-assistant/base:latest --tag lapahub-addon:pinned-base lapahub
+      - name: Build without BUILD_FROM like the failing Supervisor invocation
+        run: docker build --pull --build-arg BUILD_ARCH=amd64 --tag lapahub-addon:smoke lapahub
+      - name: Verify runtime imports, version fallback and private-database persistence
+        run: docker run --rm --network none --entrypoint python3 -e PYTHONPATH=/app -v "$PWD/scripts/image_smoke.py:/tmp/image_smoke.py:ro" lapahub-addon:smoke /tmp/image_smoke.py

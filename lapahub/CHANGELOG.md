@@ -1,4 +1,55 @@
+# 1.0.59 — Qualify live power source reports
+
+- Require timezone-aware HA last_reported within ten minutes (at most one minute ahead) for live power values.
+- Preserve fresh reported zero and use its source timestamp; unproven freshness becomes unmeasured, without diagnosing a device fault.
+- Gate raw and dashboard power paths together; preserve battery percentage and cumulative counter snapshot semantics.
+- Read actual direct stat_rate power mappings and retain null configured power members so cloud readers can reject incomplete aggregates.
+- Older HA instances without report timestamps remain compatible, with live power freshness unknown.
+- Preserve options, slug and both private databases.
+
+# 1.0.58 — Home Assistant recovery pacing
+
+Pace every WebSocket reconnect with bounded backoff, resetting after a healthy authenticated connection. Wake the existing bounded worker after authenticated connect or HA start to restore only missing, unsuppressed managed scene definitions; never activate scenes. Keep raw observed automation config uploads limited to LapaHub configuration IDs.
+
+# 1.0.57 — Private configuration logging
+
+Remove raw automation configuration and authentication/SSE response bodies from logs. Preserve bounded status diagnostics and command receipt correlation.
+
+# 1.0.56 — Pinned Supervisor architecture selection
+
+- Replace deprecated build.yaml with Dockerfile architecture stages and immutable base-image pins.
+- Select the supported architecture through BUILD_ARCH; Supervisor BUILD_FROM overrides cannot select latest.
+- Preserve the addon slug, options, databases and Python behavior.
+
+# 1.0.55 — Supervisor build compatibility
+
+- Declare verified architecture-specific Alpine 3.22 base images with immutable digest pins.
+- Provide a pinned multiarch default when Supervisor omits the BUILD_FROM argument.
+- Install matching Alpine Python packages, avoiding native psutil compilation during addon builds.
+- Bundle version metadata and PyYAML for accurate fallback reporting without Supervisor access.
+- Add a real image-build, application import and SQLite persistence smoke gate to cloud CI.
+- Preserve the existing addon slug, options and both private databases; application behavior is unchanged.
+
+# 1.0.54 — Command reliability and state responsiveness
+
+- Durable command receipts prevent duplicate HA dispatch across reconnect/restart.
+- Persist acknowledgements and retry HTTP failures without repeating device actions.
+- Reject expired instructions and preserve unknown outcomes after interrupted execution.
+- Advertise command protocol 2 for safe cloud lease recovery.
+- Keep HA state ingestion responsive with bounded publication workers, per-entity ordering and queue metrics.
+- Requires the companion cloud reliability update before the new app is distributed.
+
+- Retain confirmed managed scene definitions in persistent SQLite storage.
+- Restore missing definitions after HA reload/restart without activating devices.
+- Suppress deleted scenes before HA deletion, including uncertain responses.
+- Resolve snapshots once and retain explicit states across restart.
+- Recheck command deadlines after waiting for scene locks, HA lookups and restoration; stale scene activations never turn devices on.
+- Reject mutation of imported HA scenes instead of silently editing a different prefixed scene.
+- Cloud verification covers 30 tests, including mocked scene CRUD, edit persistence and deadline expiry during preflight. Physical scene-member confirmation remains a release gate.
+
 # Changelog
+
+
 
 ## 1.0.52
 
