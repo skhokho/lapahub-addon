@@ -21,10 +21,10 @@ state = {'entity_id': 'sensor.fixture', 'state': '0',
          'last_updated': '2020-01-01T00:00:00Z',
          'last_reported': (now - timedelta(minutes=50)).isoformat(),
          'attributes': {'device_class': 'power', 'unit_of_measurement': 'W'}}
-prefs = {'energy_sources': [{'type': 'grid', 'power': 'sensor.fixture'}]}
+prefs = {'energy_sources': [{'type': 'grid', 'stat_rate': 'sensor.fixture'}]}
 report = collect_energy_payload([state], prefs, now)
 assert report['sensors']['sensor.fixture']['value'] is None
-assert not report['dashboard_sources'], 'Cached power bypassed source freshness'
+assert report['dashboard_sources']['sensor.fixture']['value'] is None, 'Cached power bypassed source freshness'
 state['last_reported'] = now.isoformat()
 report = collect_energy_payload([state], prefs, now)
 assert report['sensors']['sensor.fixture']['value'] == 0

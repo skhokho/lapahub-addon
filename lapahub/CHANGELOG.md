@@ -3,6 +3,7 @@
 - Require timezone-aware HA last_reported within ten minutes (at most one minute ahead) for live power values.
 - Preserve fresh reported zero and use its source timestamp; unproven freshness becomes unmeasured, without diagnosing a device fault.
 - Gate raw and dashboard power paths together; preserve battery percentage and cumulative counter snapshot semantics.
+- Read actual direct stat_rate power mappings and retain null configured power members so cloud readers can reject incomplete aggregates.
 - Older HA instances without report timestamps remain compatible, with live power freshness unknown.
 - Preserve options, slug and both private databases.
 

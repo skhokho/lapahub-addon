@@ -54,7 +54,7 @@ class PayloadTests(unittest.TestCase):
         prefs = {'energy_sources': [{'type': 'grid', 'power': [{'stat_rate': 'sensor.power'}]}]}
         report = collect_energy_payload([stale], prefs, fetched)
         self.assertIsNone(report['sensors']['sensor.power']['value'])
-        self.assertNotIn('sensor.power', report['dashboard_sources'])
+        self.assertIsNone(report['dashboard_sources']['sensor.power']['value'])
         # Fresh unchanged reports remain measured, regardless of last_updated.
         stale['last_reported'] = (fetched - timedelta(seconds=30)).isoformat()
         report = collect_energy_payload([stale], prefs, fetched)
@@ -65,7 +65,7 @@ class PayloadTests(unittest.TestCase):
         # Direct dashboard power is also gated without device_class metadata.
         stale['attributes'].pop('device_class')
         stale.pop('last_reported')
-        self.assertNotIn('sensor.power', collect_energy_payload([stale], prefs, fetched)['dashboard_sources'])
+        self.assertIsNone(collect_energy_payload([stale], prefs, fetched)['dashboard_sources']['sensor.power']['value'])
         # State-of-charge and cumulative readings retain snapshot semantics.
         soc = sensor('55', '%', 'battery', 'sensor.soc')
         counter = sensor('123', 'kWh', 'energy', 'sensor.counter')
@@ -92,7 +92,28 @@ class PayloadTests(unittest.TestCase):
             with self.subTest(prefs=prefs):
                 report = collect_energy_payload([state], prefs, NOW)
                 self.assertIsNone(report['sensors']['sensor.power']['value'])
-                self.assertEqual(report['dashboard_sources'], {})
+                self.assertIsNone(report['dashboard_sources']['sensor.power']['value'])
+                self.assertTrue(report['dashboard_sources']['sensor.power']['is_power_sensor'])
+
+    def test_actual_direct_stat_rate_shape_preserves_missing_configured_members(self):
+        # Redacted actual preference shape: grid, battery and solar expose
+        # stat_rate directly, not only the legacy power list. IDs are fixtures.
+        for kind in ('grid', 'battery', 'solar'):
+            with self.subTest(kind=kind):
+                prefs = {'energy_sources': [{'type': kind, 'stat_rate': 'sensor.power'}]}
+                report = collect_energy_payload([], prefs, NOW)
+                entry = report['dashboard_sources']['sensor.power']
+                self.assertEqual(entry['type'], kind)
+                self.assertTrue(entry['is_power_sensor'])
+                self.assertIsNone(entry['value'])
+                self.assertNotIn('unit', entry)  # Never guess units for absent HA state.
+                report = collect_energy_payload([sensor('0')], prefs, NOW)
+                self.assertEqual(report['dashboard_sources']['sensor.power']['value'], 0)
+                state = sensor('0')
+                state['last_reported'] = (NOW - timedelta(minutes=50)).isoformat()
+                entry = collect_energy_payload([state], prefs, NOW)['dashboard_sources']['sensor.power']
+                self.assertIsNone(entry['value'])
+                self.assertEqual(entry['unit'], 'W')
 
     def test_source_report_timestamp_bounds_and_timezone(self):
         for age, expected in ((600, 0), (600.001, None), (-60, 0), (-60.001, None)):

@@ -78,31 +78,35 @@ def collect_energy_payload(states, preferences, fetched_at=None):
         }
 
     def add(stat_id, source_type, subtype=None, power=False):
-        if not isinstance(stat_id, str):
+        if not isinstance(stat_id, str) or not stat_id:
             return
-        state = lookup.get(stat_id.removeprefix("recorder:"))
-        if state is None:
-            return
+        state = lookup.get(stat_id.removeprefix("recorder:")) or {}
         attrs = state.get("attributes") or {}
         unit = attrs.get("unit_of_measurement")
         value = numeric(state.get("state"))
-        if not isinstance(unit, str) or not unit or value is None:
+        # Retain explicit configured power membership even if HA has no state.
+        # Readers must see missing members before filtering numerical values.
+        is_power = power or unit in ("W", "kW", "MW")
+        observed = power_observation(state, timestamp) if is_power else timestamp
+        if is_power:
+            if observed is None or unit not in ("W", "kW", "MW"):
+                value = None
+        elif not isinstance(unit, str) or not unit or value is None:
             return
-        # Every dashboard power path needs the same qualification, including
-        # legacy source fields and sources without device_class metadata.
-        observed = power_observation(state, timestamp) if unit in ("W", "kW", "MW") else timestamp
-        if observed is None:
-            return
-        entry = {"type": source_type, "value": value, "unit": unit,
+        entry = {"type": source_type, "value": value,
                  "friendly_name": attrs.get("friendly_name"),
-                 "observed_at": observed.isoformat(),
-                 "is_power_sensor": power and unit in ("W", "kW", "MW")}
+                 "observed_at": (observed or timestamp).isoformat(),
+                 "is_power_sensor": is_power}
+        if isinstance(unit, str) and unit:
+            entry["unit"] = unit
         if subtype:
             entry["subtype"] = subtype
         payload["dashboard_sources"][stat_id] = entry
 
     for source in preferences.get("energy_sources", []):
         kind = source.get("type")
+        # HA currently exposes configured instantaneous power directly here.
+        add(source.get("stat_rate"), kind, power=True)
         power = source.get("power") or []
         if isinstance(power, str):
             add(power, kind, power=True)
