@@ -20,9 +20,30 @@ def numeric(value):
         return None
 
 
+def power_observation(state, fetched_at):
+    """A current HA snapshot alone does not prove a cached power report fresh.
+
+    Ten minutes matches the cloud observation window and two default addon
+    reporting cycles. Missing report clocks (including older HA) mean unknown
+    freshness, never a hardware-fault diagnosis. last_updated is unsuitable:
+    legitimate unchanged MQTT readings can have an old change timestamp.
+    """
+    reported = state.get("last_reported")
+    if not isinstance(reported, str):
+        return None
+    try:
+        timestamp = datetime.fromisoformat(reported.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            return None
+        age = (fetched_at - timestamp).total_seconds()
+        return timestamp if -60 <= age <= 600 else None
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
 def collect_energy_payload(states, preferences, fetched_at=None):
-    # HA last_updated records changes, not observation freshness: an unchanged
-    # measured zero can be old there despite this successful current HTTP poll.
+    # Top-level time describes the HA fetch; power observations retain the
+    # actual source report clock instead of re-stamping cached values.
     timestamp = fetched_at or datetime.now(timezone.utc)
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
         raise ValueError("Energy observation time requires a timezone")
@@ -43,13 +64,16 @@ def collect_energy_payload(states, preferences, fetched_at=None):
         if len(payload["sensors"]) >= 512:
             raise ValueError("Energy snapshot exceeds 512 supported sensors")
         value = numeric(state.get("state"))
+        observed = power_observation(state, timestamp) if device_class == "power" else timestamp
+        if observed is None:
+            value = None
         if unit == "%" and value is not None and not 0 <= value <= 100:
             value = None
         payload["sensors"][entity] = {
             "value": value, "unit": unit,
             "device_class": device_class,
             "friendly_name": attributes.get("friendly_name"),
-            "observed_at": timestamp.isoformat(),
+            "observed_at": (observed or timestamp).isoformat(),
             "state_updated_at": state.get("last_updated"),
         }
 
@@ -64,9 +88,14 @@ def collect_energy_payload(states, preferences, fetched_at=None):
         value = numeric(state.get("state"))
         if not isinstance(unit, str) or not unit or value is None:
             return
+        # Every dashboard power path needs the same qualification, including
+        # legacy source fields and sources without device_class metadata.
+        observed = power_observation(state, timestamp) if unit in ("W", "kW", "MW") else timestamp
+        if observed is None:
+            return
         entry = {"type": source_type, "value": value, "unit": unit,
                  "friendly_name": attrs.get("friendly_name"),
-                 "observed_at": timestamp.isoformat(),
+                 "observed_at": observed.isoformat(),
                  "is_power_sensor": power and unit in ("W", "kW", "MW")}
         if subtype:
             entry["subtype"] = subtype

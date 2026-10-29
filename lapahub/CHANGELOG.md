@@ -1,3 +1,11 @@
+# 1.0.59 — Qualify live power source reports
+
+- Require timezone-aware HA last_reported within ten minutes (at most one minute ahead) for live power values.
+- Preserve fresh reported zero and use its source timestamp; unproven freshness becomes unmeasured, without diagnosing a device fault.
+- Gate raw and dashboard power paths together; preserve battery percentage and cumulative counter snapshot semantics.
+- Older HA instances without report timestamps remain compatible, with live power freshness unknown.
+- Preserve options, slug and both private databases.
+
 # 1.0.58 — Home Assistant recovery pacing
 
 Pace every WebSocket reconnect with bounded backoff, resetting after a healthy authenticated connection. Wake the existing bounded worker after authenticated connect or HA start to restore only missing, unsuppressed managed scene definitions; never activate scenes. Keep raw observed automation config uploads limited to LapaHub configuration IDs.

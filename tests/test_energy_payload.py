@@ -14,7 +14,7 @@ NOW = datetime(2026, 10, 28, tzinfo=timezone.utc)
 
 
 def sensor(value, unit='W', kind='power', name='sensor.power'):
-    return {'entity_id': name, 'state': value, 'last_updated': '2020-01-01T00:00:00+00:00',
+    return {'entity_id': name, 'state': value, 'last_reported': NOW.isoformat(), 'last_updated': '2020-01-01T00:00:00+00:00',
             'attributes': {'device_class': kind, 'unit_of_measurement': unit}}
 
 
@@ -44,6 +44,70 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(entry['state_updated_at'], '2020-01-01T00:00:00+00:00')
         self.assertEqual(report['timestamp'], NOW.isoformat())
         self.assertEqual(report['energy_payload_version'], 2)
+
+    def test_source_report_freshness_masks_all_power_paths_without_masking_counters(self):
+        # Reproduces the actual redacted source clock: zero last reported around
+        # 00:08, fetched after 01:00. This does not prove the physical zero wrong.
+        fetched = datetime(2026, 10, 29, 1, 0, 25, tzinfo=timezone.utc)
+        stale = sensor('0')
+        stale['last_reported'] = '2026-10-29T00:08:14.824798Z'
+        prefs = {'energy_sources': [{'type': 'grid', 'power': [{'stat_rate': 'sensor.power'}]}]}
+        report = collect_energy_payload([stale], prefs, fetched)
+        self.assertIsNone(report['sensors']['sensor.power']['value'])
+        self.assertNotIn('sensor.power', report['dashboard_sources'])
+        # Fresh unchanged reports remain measured, regardless of last_updated.
+        stale['last_reported'] = (fetched - timedelta(seconds=30)).isoformat()
+        report = collect_energy_payload([stale], prefs, fetched)
+        self.assertEqual(report['sensors']['sensor.power']['value'], 0)
+        self.assertEqual(report['sensors']['sensor.power']['observed_at'], stale['last_reported'])
+        self.assertEqual(report['dashboard_sources']['sensor.power']['value'], 0)
+        self.assertEqual(report['dashboard_sources']['sensor.power']['observed_at'], stale['last_reported'])
+        # Direct dashboard power is also gated without device_class metadata.
+        stale['attributes'].pop('device_class')
+        stale.pop('last_reported')
+        self.assertNotIn('sensor.power', collect_energy_payload([stale], prefs, fetched)['dashboard_sources'])
+        # State-of-charge and cumulative readings retain snapshot semantics.
+        soc = sensor('55', '%', 'battery', 'sensor.soc')
+        counter = sensor('123', 'kWh', 'energy', 'sensor.counter')
+        for item in (soc, counter):
+            item.pop('last_reported')
+        prefs['energy_sources'][0]['flow_from'] = [{'stat_energy_from': 'sensor.counter'}]
+        report = collect_energy_payload([soc, counter], prefs, fetched)
+        self.assertEqual(report['sensors']['sensor.soc']['value'], 55)
+        self.assertEqual(report['dashboard_sources']['sensor.counter']['value'], 123)
+
+    def test_stale_power_cannot_return_through_legacy_dashboard_fields(self):
+        state = sensor('0')
+        state.pop('last_reported')
+        cases = [
+            {'energy_sources': [{'type': 'grid', 'power': 'sensor.power'}]},
+            {'energy_sources': [{'type': 'grid', 'power': [{'stat_rate': 'sensor.power'}]}]},
+            {'energy_sources': [{'type': 'grid', 'flow_from': [{'stat_energy_from': 'sensor.power'}]}]},
+            {'energy_sources': [{'type': 'grid', 'flow_to': [{'stat_energy_to': 'sensor.power'}]}]},
+            {'energy_sources': [{'type': 'solar', 'stat_energy_from': 'sensor.power'}]},
+            {'energy_sources': [{'type': 'battery', 'entity_id': 'sensor.power'}]},
+            {'device_consumption': [{'stat_consumption': 'sensor.power'}]},
+        ]
+        for prefs in cases:
+            with self.subTest(prefs=prefs):
+                report = collect_energy_payload([state], prefs, NOW)
+                self.assertIsNone(report['sensors']['sensor.power']['value'])
+                self.assertEqual(report['dashboard_sources'], {})
+
+    def test_source_report_timestamp_bounds_and_timezone(self):
+        for age, expected in ((600, 0), (600.001, None), (-60, 0), (-60.001, None)):
+            with self.subTest(age=age):
+                state = sensor('0')
+                state['last_reported'] = (NOW - timedelta(seconds=age)).isoformat()
+                self.assertEqual(collect_energy_payload([state], {}, NOW)['sensors']['sensor.power']['value'], expected)
+        for stamp in (None, '', 'invalid', '2026-10-28T00:00:00', True, 42):
+            with self.subTest(stamp=stamp):
+                state = sensor('0')
+                state['last_reported'] = stamp
+                self.assertIsNone(collect_energy_payload([state], {}, NOW)['sensors']['sensor.power']['value'])
+        state = sensor('0')
+        state['last_reported'] = '2026-10-28T02:00:00+02:00'
+        self.assertEqual(collect_energy_payload([state], {}, NOW)['sensors']['sensor.power']['value'], 0)
 
     def test_supported_units_explicit_and_no_missing_power_synthesized(self):
         for unit in ('W', 'kW', 'MW'):
