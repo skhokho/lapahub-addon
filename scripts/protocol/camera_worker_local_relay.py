@@ -131,8 +131,8 @@ async def publisher_only():
     site = web.TCPSite(runner, '127.0.0.1', 0)
     await site.start()
     ha = 'http://127.0.0.1:' + str(site._server.sockets[0].getsockname()[1])
-    deadline = time.monotonic() + 240
-    print(json.dumps({'publisher_ready': True, 'generated_source': ha, 'max_seconds': 240}), flush=True)
+    deadline = time.monotonic() + 300
+    print(json.dumps({'publisher_ready': True, 'generated_source': ha, 'max_seconds': 300}), flush=True)
     try:
         async with aiohttp.ClientSession(trust_env=False) as session:
             worker = CameraCaptureWorker(session, ha, 'synthetic-generated-ha', RELAY,

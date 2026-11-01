@@ -200,7 +200,7 @@ class CameraCaptureWorker:
                                          timeout=aiohttp.ClientTimeout(total=3)) as response:
                 if response.status != 200:
                     if response.status in (403, 404, 410):
-                        self.blocked.update(self.sequences)
+                        self.blocked.update(self.bindings)
                     return 2
                 views = self.parse_views(await self.small_json(response))
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError):

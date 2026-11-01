@@ -275,3 +275,14 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.ha_status = 200
         await self.worker.step()
         self.assertEqual(len(self.camera_calls), 1)
+
+    async def test_terminal_demand_revocation_blocks_binding_without_accepted_frame(self):
+        # A source fetch can finish after its local lease deadline, before the
+        # first sequence is reserved. The known binding must still be revoked.
+        self.worker.bindings = {'view-one': 'camera.fixture'}
+        self.demand_status = 403
+        await self.worker.step()
+        self.demand_status = 200
+        await self.worker.step()
+        self.assertEqual(self.camera_calls, [])
+        self.assertIn('view-one', self.worker.blocked)

@@ -22,6 +22,7 @@
   "close_removed_demand": true,
   "scope": "offline worker/relay integration only",
   "camera_capture_sha256": "f07407663d1815d12f7dfe135d8f390178a4d44e50bd689d0bb8bd7b9cc4670e",
-  "full_addon_tests": 87,
-  "official_ha_worker_integration": "pending disk resource gate; af155 only proves prior HA camera API"
+  "full_addon_tests": 88,
+  "official_ha_worker_integration": "pending disk resource gate; af155 only proves prior HA camera API",
+  "source_note": "Recorded relay proof hash precedes terminal-binding-only follow-up; that follow-up is independently covered by real HTTP regression. Official HA integration remains separate."
 }

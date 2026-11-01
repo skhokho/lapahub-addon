@@ -44,7 +44,7 @@ the fixed safe enum via /hub/status, never an exception body, URL or credentials
 No image bytes, leases or per-frame commands enter SQLite, logs, cloud documents
 or disk caches. Synthetic checked-in test fixtures are not production frame caches. Local frame buffers are cleared after each attempt.
 
-Validation: all 87 addon tests pass, including 18 new camera checks. The new tests
+Validation: all 88 addon tests pass, including 19 new camera checks. The new tests
 exercise real localhost aiohttp routes with static synthetic JPEG fixtures and a
 relay stub, not production HA or the actual backend. They cover baseline/progressive
 JPEG structure, malformed markers/dimensions, chunked oversized bodies, sequence
@@ -78,3 +78,10 @@ helpers/emulator; app lifecycle/freshness proof; and
 root-controlled backend-before-addon rollout with both production databases
 preserved. Prior af155434 proves the HA JPEG/MJPEG API only. This commit does not
 prove end-to-end live camera viewing, native performance or hardware compatibility.
+
+A follow-up terminal-revocation regression covers a known view binding that has
+not yet produced an accepted frame/sequence. Terminal demand denial now blocks
+all known bindings, rather than only those with sequence metadata. That edge is
+verified through real localhost HTTP tests. The bounded generated-source helper
+also offers a five-minute publisher-only mode for the independently owned Chromium
+fixture; it creates no viewer lease and cleans up its own source/session on exit.
