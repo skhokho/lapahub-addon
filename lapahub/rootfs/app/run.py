@@ -1194,6 +1194,12 @@ class LapaHubAddon:
         restored = True
         async with self.scene_lock:
             for entity_id, definition in self.managed_scenes.active().items():
+                members = definition.get("entities")
+                if not isinstance(members, dict) or not members or any(
+                        not isinstance(member, str) or member.startswith("camera.") for member in members):
+                    # Retain legacy rows untouched, but never recreate view-only members.
+                    restored = False
+                    continue
                 if entity_id not in present:
                     accepted = await self.call_ha_service("scene", "create", definition)
                     if not accepted:
@@ -1207,6 +1213,11 @@ class LapaHubAddon:
             check_command_deadline(expires_at)
             definition = self.managed_scenes.active().get(entity_id)
             if definition:
+                members = definition.get("entities")
+                if not isinstance(members, dict) or not members:
+                    return False
+                if any(not isinstance(member, str) or member.startswith("camera.") for member in members):
+                    raise ValueError("Cameras support viewing only; scene rejected")
                 states = await self.get_ha_states()
                 if not states:
                     return False
@@ -1214,6 +1225,15 @@ class LapaHubAddon:
                     check_command_deadline(expires_at)
                     if not await self.call_ha_service("scene", "create", definition):
                         return False
+            else:
+                # Imported scenes need current, complete HA membership before any run.
+                states = await self.get_ha_states()
+                scene = next((state for state in states or [] if state.get("entity_id") == entity_id), None)
+                members = (scene or {}).get("attributes", {}).get("entity_id")
+                if not isinstance(members, list) or not members or any(not isinstance(member, str) for member in members):
+                    return False
+                if any(member.startswith("camera.") for member in members):
+                    raise ValueError("Cameras support viewing only; scene rejected")
             # HA lookups/restoration and another scene action may consume the
             # confirmation window. Never activate stale intent after preflight.
             check_command_deadline(expires_at)
@@ -1270,6 +1290,11 @@ class LapaHubAddon:
 
     async def create_scene(self, scene_id: str, entities: dict = None, snapshot_entities: list = None, scene_name: str = None, expires_at=None) -> bool:
         """Create a dynamic scene and durably retain confirmed explicit states."""
+        # Check both inputs, including an otherwise ignored snapshot argument.
+        # Reject the whole operation before reading HA state or copying attributes.
+        members = list(entities or {}) + list(snapshot_entities or [])
+        if any(not isinstance(member, str) or member.startswith("camera.") for member in members):
+            raise ValueError("Cameras support viewing only; scene rejected")
         if scene_id.startswith("scene.") and not scene_id.startswith("scene.lapahub_"):
             raise ValueError("Imported HA scenes cannot be replaced by LapaHub")
         slug = scene_id.removeprefix("scene.").replace("-", "_")
@@ -1284,6 +1309,9 @@ class LapaHubAddon:
             by_id = {state["entity_id"]: state for state in states}
             if any(entity not in by_id for entity in snapshot_entities):
                 return False
+            if any(by_id[entity].get("entity_id", "").startswith("camera.") or
+                   by_id[entity].get("domain") == "camera" for entity in snapshot_entities):
+                raise ValueError("Cameras support viewing only; scene rejected")
             service_data["entities"] = {
                 entity: {**by_id[entity].get("attributes", {}), "state": by_id[entity]["state"]}
                 for entity in snapshot_entities
@@ -1444,6 +1472,15 @@ class LapaHubAddon:
 
     async def call_ha_service(self, domain: str, service: str, data: dict) -> bool:
         """Call a Home Assistant service."""
+        targets = data.get("entity_id", [])
+        if isinstance(targets, str):
+            targets = targets.split(",")
+        if domain == "camera" or (isinstance(targets, (list, tuple)) and any(
+                isinstance(target, str) and target.strip().startswith("camera.") for target in targets)):
+            return False
+        if domain == "scene" and any(isinstance(member, str) and member.startswith("camera.")
+                for member in list(data.get("entities") or {}) + list(data.get("snapshot_entities") or [])):
+            return False
         from reliability import active_command
         from ha_target import require_live_target, TargetNotDispatched
         context = active_command.get()
@@ -1976,6 +2013,9 @@ class LapaHubAddon:
         params = command.get("params", {})
         entity_id = command.get("entity_id") or params.get("entity_id", "")
         action = command.get("action")
+        if ((isinstance(entity_id, str) and entity_id.startswith("camera.")) or
+                (isinstance(action, str) and action.startswith("camera."))):
+            raise ValueError("Cameras support viewing only; control rejected")
 
         logger.info(f"Executing command {cmd_id}: {action} on {entity_id or 'N/A'}")
         success = False
@@ -2098,7 +2138,10 @@ class LapaHubAddon:
                     raise ValueError("Command domain does not match target entity")
             service_data = {**params, "entity_id": entity_id}
 
-            success = await self.call_ha_service(domain, service, service_data)
+            if domain == "scene" and service == "turn_on":
+                success = await self.trigger_scene(entity_id, expires_at=command.get("expires_at"))
+            else:
+                success = await self.call_ha_service(domain, service, service_data)
 
         # Report command result back to cloud
         self.command_journal.complete(cmd_id, "service_accepted" if success else "unknown")
