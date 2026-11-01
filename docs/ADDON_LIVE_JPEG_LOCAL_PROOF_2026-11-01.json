@@ -1,0 +1,27 @@
+{
+  "result": "pass",
+  "fixture": "demo-lapahub-camera-local",
+  "ha": "generated HTTP fixture, not official HA",
+  "relay": "actual production handler and Firestore emulator store; fake fixture identity",
+  "frames": [
+    {
+      "sequence": 1,
+      "hash": "2b94eda3ade0aa843c3697501464f6341c9fb71ab8d6519542359d96f85c5c1d",
+      "bytes": 868,
+      "observedAt": "2026-11-01T05:40:31.271Z"
+    },
+    {
+      "sequence": 2,
+      "hash": "f87afccf406be7e2d620415a70dde59974c5cfc56e1a374049935e06ea5a2932",
+      "bytes": 868,
+      "observedAt": "2026-11-01T05:40:32.400Z"
+    }
+  ],
+  "off_status": 503,
+  "off_generation_stopped": true,
+  "close_removed_demand": true,
+  "scope": "offline worker/relay integration only",
+  "camera_capture_sha256": "f07407663d1815d12f7dfe135d8f390178a4d44e50bd689d0bb8bd7b9cc4670e",
+  "full_addon_tests": 87,
+  "official_ha_worker_integration": "pending disk resource gate; af155 only proves prior HA camera API"
+}

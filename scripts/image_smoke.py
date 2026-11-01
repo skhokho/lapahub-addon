@@ -11,6 +11,7 @@ import yaml
 from managed_scenes import ManagedScenes
 from reliability import CommandJournal
 from ha_target import require_live_target, TargetNotDispatched
+from camera_capture import safe_camera_attributes, validate_jpeg
 
 expected = str(yaml.safe_load(Path('/config.yaml').read_text())['version'])
 app = importlib.import_module('run')
@@ -30,6 +31,9 @@ state['last_reported'] = now.isoformat()
 report = collect_energy_payload([state], prefs, now)
 assert report['sensors']['sensor.fixture']['value'] == 0
 assert report['dashboard_sources']['sensor.fixture']['observed_at'] == now.isoformat()
+
+assert safe_camera_attributes({'access_token': 'fixture-secret', 'supported_features': 3}) == {'supported_features': 3}
+assert validate_jpeg(Path('/tmp/camera-generated.jpg').read_bytes(), 'image/jpg') == (160, 96)
 
 with tempfile.TemporaryDirectory() as directory:
     path = Path(directory)

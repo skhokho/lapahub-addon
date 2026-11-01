@@ -25,6 +25,7 @@ from aiohttp import web
 from reliability import CommandExpired, CommandJournal, StatePublisher, check_command_deadline
 from managed_scenes import ManagedScenes
 from energy_payload import EnergyDeliveryError, collect_energy_payload
+from camera_capture import CameraCaptureWorker, safe_camera_attributes, safe_camera_state
 
 # Configure logging
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").upper()
@@ -300,6 +301,7 @@ class LapaHubAddon:
                 self.state_publisher.worker(),
                 self.state_publisher.worker(),
                 self.energy_report_loop(),
+                self.camera_capture_loop(),
                 self.token_refresh_loop(),
                 self.ha_websocket_loop(),      # LAPA-74: Real-time state updates
                 self.heartbeat_loop(),          # LAPA-75: Health heartbeat
@@ -556,7 +558,7 @@ class LapaHubAddon:
         domain = entity_id.split(".")[0] if "." in entity_id else ""
         relevant_domains = [
             "switch", "light", "climate", "cover", "fan",
-            "sensor", "binary_sensor", "lock", "media_player",
+            "sensor", "binary_sensor", "lock", "media_player", "camera",
             "input_boolean", "siren", "remote", "button", "vacuum",
             "water_heater", "humidifier", "valve",
             "scene", "automation",
@@ -566,6 +568,8 @@ class LapaHubAddon:
             return
 
         new_state_value = new_state.get("state")
+        if domain == "camera":
+            new_state_value = safe_camera_state(new_state_value)
 
         # Realtime filtering based on config:
         # - Commands (light, switch, cover, climate, fan, lock, media_player): Always realtime
@@ -573,7 +577,7 @@ class LapaHubAddon:
         # - Sensors: Only realtime if sensor_realtime is True, otherwise polled
         realtime_domains = [
             "switch", "light", "climate", "cover", "fan",
-            "lock", "media_player", "scene", "automation",
+            "lock", "media_player", "camera", "scene", "automation",
             "input_boolean", "siren", "remote", "button", "vacuum",
             "water_heater", "humidifier", "valve",
             "binary_sensor",  # Always realtime for security
@@ -588,6 +592,8 @@ class LapaHubAddon:
 
         # Update local cache
         attributes = new_state.get("attributes", {})
+        if domain == "camera":
+            attributes = safe_camera_attributes(attributes)
         device = {
             "entity_id": entity_id,
             "domain": domain,
@@ -605,6 +611,14 @@ class LapaHubAddon:
             self.state_publisher.offer(device, start_time)
             if self.state_publisher.dropped:
                 logger.warning("State publication overflow: dropped=%s queued=%s", self.state_publisher.dropped, len(self.state_publisher.pending))
+
+    async def camera_capture_loop(self):
+        worker = CameraCaptureWorker(
+            self.session, HA_BASE_URL, SUPERVISOR_TOKEN or '',
+            f"https://us-central1-{self.firebase_project}.cloudfunctions.net/cameraRelay",
+            self.hub_id, lambda: (self.firebase_credentials or {}).get('token', ''),
+            running=lambda: self.running)
+        await worker.run()
 
     async def push_state_change_to_cloud(self, device: dict, start_time: float = None):
         """Push a single device state change to cloud."""
@@ -1675,7 +1689,7 @@ class LapaHubAddon:
         # Filter to relevant domains
         relevant_domains = [
             "switch", "light", "climate", "cover", "fan",
-            "sensor", "binary_sensor", "lock", "media_player",
+            "sensor", "binary_sensor", "lock", "media_player", "camera",
             "input_boolean", "siren", "remote", "button", "vacuum",
             "water_heater", "humidifier", "valve",
         ]
@@ -1690,6 +1704,8 @@ class LapaHubAddon:
                 continue
 
             attributes = state.get("attributes", {})
+            if domain == "camera":
+                attributes = safe_camera_attributes(attributes)
 
             # Get device_id from entity registry mapping (populated during sync_physical_devices)
             device_id = self.entity_device_map.get(entity_id)
@@ -1707,7 +1723,7 @@ class LapaHubAddon:
                 "domain": domain,
                 "friendly_name": attributes.get("friendly_name", entity_id),
                 "device_class": attributes.get("device_class"),
-                "state": state.get("state"),
+                "state": safe_camera_state(state.get("state")) if domain == "camera" else state.get("state"),
                 "attributes": attributes,
                 "last_updated": state.get("last_updated"),
                 # Parent device linkage (new fields for hierarchical view)
