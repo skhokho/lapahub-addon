@@ -22,6 +22,10 @@ from collections import deque
 
 import aiohttp
 from aiohttp import web
+from reliability import CommandExpired, CommandJournal, StatePublisher, check_command_deadline
+from managed_scenes import ManagedScenes
+from energy_payload import EnergyDeliveryError, collect_energy_payload
+from camera_capture import CameraCaptureWorker, safe_camera_attributes, safe_camera_state
 
 # Configure logging
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").upper()
@@ -85,7 +89,7 @@ def _read_addon_version() -> str:
     except Exception as e:
         logger.warning(f"Could not read version from config.yaml: {e}")
 
-    return "1.0.53"  # Last resort fallback — keep in sync with config.yaml
+    return "1.0.61"  # Last resort fallback — keep in sync with config.yaml
 
 ADDON_VERSION = _read_addon_version()
 
@@ -142,7 +146,7 @@ def get_supervisor_token() -> str | None:
 
 SUPERVISOR_TOKEN = get_supervisor_token()
 if SUPERVISOR_TOKEN:
-    logger.info(f"Supervisor token obtained (length: {len(SUPERVISOR_TOKEN)})")
+    logger.info("Supervisor credentials available")
 else:
     logger.error("No supervisor token - Home Assistant API calls will fail!")
 
@@ -159,11 +163,18 @@ class LapaHubAddon:
         self.firebase_project = os.environ.get("FIREBASE_PROJECT_ID", "lapahub-dev-c8872")
 
         # Sensor realtime config (BETA: default off to reduce Firestore writes)
+        self.camera_live_enabled = self.options.get("camera_live_enabled", False) is True
         self.sensor_realtime = self.options.get("sensor_realtime", False)
         self.sensor_poll_interval = self.options.get("sensor_poll_interval_seconds", 30)
 
         self.session: aiohttp.ClientSession | None = None
         self.devices: dict = {}
+        self.command_journal = CommandJournal("/data/command_journal.sqlite3")
+        self.managed_scenes = ManagedScenes("/data/managed_scenes.sqlite3")
+        self.scene_lock = asyncio.Lock()
+        self.automation_refresh_wake = asyncio.Event()
+        self.scene_restore_requested = asyncio.Event()
+        self.state_publisher = StatePublisher(self.push_state_change_to_cloud)
         self.running = True
         self.shutting_down = False
 
@@ -286,10 +297,16 @@ class LapaHubAddon:
             tasks = [
                 self.device_sync_loop(),
                 self.command_listener_loop(),
+                self.command_ack_loop(),
+                self.state_publisher.worker(),
+                self.state_publisher.worker(),
+                self.state_publisher.worker(),
                 self.energy_report_loop(),
+                self.camera_capture_loop(),
                 self.token_refresh_loop(),
                 self.ha_websocket_loop(),      # LAPA-74: Real-time state updates
                 self.heartbeat_loop(),          # LAPA-75: Health heartbeat
+                self.automation_refresh_loop(),
                 self.scene_sync_loop(),         # LAPA-78: Sync scenes/automations
                 self.run_web_server(),
             ]
@@ -343,6 +360,8 @@ class LapaHubAddon:
             await self.session.close()
             logger.info("HTTP session closed")
 
+        self.managed_scenes.close()
+        self.command_journal.close()
         logger.info("Cleanup complete, addon stopped")
 
     async def authenticate_with_retry(self):
@@ -389,8 +408,7 @@ class LapaHubAddon:
                     logger.info(f"Successfully authenticated (token expires at {self.token_expires_at.isoformat()})")
                     return True
                 else:
-                    error = await resp.text()
-                    logger.error(f"Authentication failed ({resp.status}): {error}")
+                    logger.error("Authentication failed (HTTP %s)", resp.status)
                     return False
         except aiohttp.ClientError as e:
             logger.warning(f"Could not reach LapaHub cloud: {e}")
@@ -429,37 +447,45 @@ class LapaHubAddon:
     # ==================== LAPA-74: WebSocket Real-time Updates ====================
 
     async def ha_websocket_loop(self):
-        """Maintain WebSocket connection to Home Assistant for real-time updates."""
+        """Pace every disconnect, including caught handshake/auth failures."""
         logger.info("Starting Home Assistant WebSocket loop")
-
+        delay = 2
         while self.running:
+            healthy = False
             try:
-                await self.connect_ha_websocket()
+                healthy = await self.connect_ha_websocket()
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
-                self.log_activity(f"WebSocket error: {e}", "error")
-                await asyncio.sleep(10)  # Wait before reconnecting
+            except Exception:
+                self.log_activity("WebSocket connection unavailable", "warning")
+            if not self.running:
+                return
+            if healthy:
+                delay = 2
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
 
     async def connect_ha_websocket(self):
-        """Connect to Home Assistant WebSocket API."""
-        ws_url = "ws://supervisor/core/websocket"
+        """Connect and report whether authentication stayed healthy for 30 seconds."""
+        ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
 
+        authenticated_at = None
         try:
-            self.ha_websocket = await self.session.ws_connect(ws_url)
+            self.ha_websocket = await asyncio.wait_for(self.session.ws_connect(ws_url), timeout=10)
             self.log_activity("Connected to Home Assistant WebSocket")
 
-            # Authenticate
-            auth_msg = await self.ha_websocket.receive_json()
-            if auth_msg.get("type") == "auth_required":
-                await self.ha_websocket.send_json({
-                    "type": "auth",
-                    "access_token": SUPERVISOR_TOKEN,
-                })
-                auth_result = await self.ha_websocket.receive_json()
-                if auth_result.get("type") != "auth_ok":
-                    raise Exception(f"WebSocket auth failed: {auth_result}")
-                self.log_activity("WebSocket authenticated")
+            # Never subscribe or restore on an unexpected/failed auth greeting.
+            auth_msg = await asyncio.wait_for(self.ha_websocket.receive_json(), timeout=10)
+            if auth_msg.get("type") != "auth_required":
+                raise RuntimeError("Unexpected Home Assistant authentication greeting")
+            await self.ha_websocket.send_json({"type": "auth", "access_token": SUPERVISOR_TOKEN})
+            auth_result = await asyncio.wait_for(self.ha_websocket.receive_json(), timeout=10)
+            if auth_result.get("type") != "auth_ok":
+                raise RuntimeError("Home Assistant WebSocket authentication rejected")
+            authenticated_at = asyncio.get_running_loop().time()
+            self.log_activity("WebSocket authenticated")
+            self.scene_restore_requested.set()
+            self.automation_refresh_wake.set()
 
             # Fetch Energy Dashboard preferences on connect
             await self.fetch_energy_prefs()
@@ -491,9 +517,14 @@ class LapaHubAddon:
         except Exception as e:
             self.log_activity(f"WebSocket connection error: {e}", "warning")
         finally:
-            if self.ha_websocket and not self.ha_websocket.closed:
-                await self.ha_websocket.close()
-            self.ha_websocket = None
+            try:
+                if self.ha_websocket and not self.ha_websocket.closed:
+                    await asyncio.wait_for(self.ha_websocket.close(), timeout=5)
+            except Exception:
+                self.log_activity("WebSocket close did not complete cleanly", "warning")
+            finally:
+                self.ha_websocket = None
+        return authenticated_at is not None and asyncio.get_running_loop().time() - authenticated_at >= 30
 
     async def handle_ws_message(self, data: dict):
         """Handle incoming WebSocket message from Home Assistant."""
@@ -506,6 +537,8 @@ class LapaHubAddon:
             if event_type == "state_changed":
                 await self.handle_state_change(event.get("data", {}))
             elif event_type == "homeassistant_started":
+                self.scene_restore_requested.set()
+                self.automation_refresh_wake.set()
                 # HA restarted - refresh energy dashboard config
                 logger.info("Home Assistant started - refreshing Energy Dashboard config")
                 self.log_activity("HA restarted - refreshing config")
@@ -526,14 +559,21 @@ class LapaHubAddon:
         domain = entity_id.split(".")[0] if "." in entity_id else ""
         relevant_domains = [
             "switch", "light", "climate", "cover", "fan",
-            "sensor", "binary_sensor", "lock", "media_player",
+            "sensor", "binary_sensor", "lock", "media_player", "camera",
+            "input_boolean", "siren", "remote", "button", "vacuum",
+            "water_heater", "humidifier", "valve",
             "scene", "automation",
         ]
 
         if domain not in relevant_domains:
             return
 
+        if domain == "camera" and not getattr(self, "camera_live_enabled", False):
+            return
+
         new_state_value = new_state.get("state")
+        if domain == "camera":
+            new_state_value = safe_camera_state(new_state_value)
 
         # Realtime filtering based on config:
         # - Commands (light, switch, cover, climate, fan, lock, media_player): Always realtime
@@ -541,7 +581,9 @@ class LapaHubAddon:
         # - Sensors: Only realtime if sensor_realtime is True, otherwise polled
         realtime_domains = [
             "switch", "light", "climate", "cover", "fan",
-            "lock", "media_player", "scene", "automation",
+            "lock", "media_player", "camera", "scene", "automation",
+            "input_boolean", "siren", "remote", "button", "vacuum",
+            "water_heater", "humidifier", "valve",
             "binary_sensor",  # Always realtime for security
         ]
 
@@ -554,6 +596,8 @@ class LapaHubAddon:
 
         # Update local cache
         attributes = new_state.get("attributes", {})
+        if domain == "camera":
+            attributes = safe_camera_attributes(attributes)
         device = {
             "entity_id": entity_id,
             "domain": domain,
@@ -568,7 +612,20 @@ class LapaHubAddon:
         # Push state change to cloud (skip sensors in polling mode)
         should_push_realtime = domain != "sensor" or self.sensor_realtime
         if self.firebase_credentials and should_push_realtime:
-            await self.push_state_change_to_cloud(device, start_time)
+            self.state_publisher.offer(device, start_time)
+            if self.state_publisher.dropped:
+                logger.warning("State publication overflow: dropped=%s queued=%s", self.state_publisher.dropped, len(self.state_publisher.pending))
+
+    async def camera_capture_loop(self):
+        # Rollout gate: absent/false options must not contact relay or HA cameras.
+        if not getattr(self, "camera_live_enabled", False):
+            return
+        worker = CameraCaptureWorker(
+            self.session, HA_BASE_URL, SUPERVISOR_TOKEN or '',
+            "https://us-central1-lapahub-dev-c8872.cloudfunctions.net/cameraRelay",
+            self.hub_id, lambda: (self.firebase_credentials or {}).get('token', ''),
+            running=lambda: self.running)
+        await worker.run()
 
     async def push_state_change_to_cloud(self, device: dict, start_time: float = None):
         """Push a single device state change to cloud."""
@@ -589,11 +646,14 @@ class LapaHubAddon:
                 elapsed = (time.time() - start_time) * 1000 if start_time else 0
                 if resp.status == 200:
                     logger.info(f"[RT] Pushed {device['entity_id']} to cloud ({elapsed:.0f}ms)")
+                    return True
                 else:
                     logger.warning(f"[RT] Push failed for {device['entity_id']}: {resp.status} ({elapsed:.0f}ms)")
         except Exception as e:
             elapsed = (time.time() - start_time) * 1000 if start_time else 0
             logger.warning(f"[RT] Push error for {device['entity_id']}: {e} ({elapsed:.0f}ms)")
+
+        return False
 
     # ==================== Sensor Polling (Beta Mode) ====================
 
@@ -721,6 +781,62 @@ class LapaHubAddon:
 
     # ==================== LAPA-78: Scenes and Automations ====================
 
+    async def automation_refresh_loop(self):
+        """One coalescing worker observes async reloads without delaying receipts.
+
+        Five observation/restoration passes per wake burst; slow/offline HA cannot accumulate
+        command tasks. Periodic sync remains the fallback after the bounded window.
+        """
+        while self.running:
+            await self.automation_refresh_wake.wait()
+            if not self.running:
+                return
+            self.automation_refresh_wake.clear()
+            for delay in (0, 1, 2, 4, 8):
+                if delay:
+                    try:
+                        await asyncio.wait_for(self.automation_refresh_wake.wait(), timeout=delay)
+                        self.automation_refresh_wake.clear()
+                    except asyncio.TimeoutError:
+                        pass
+                if not self.running:
+                    return
+                try:
+                    await asyncio.wait_for(self.refresh_automation_bindings(), timeout=8)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("Prompt automation binding refresh unavailable; retry window is bounded", exc_info=True)
+
+    async def refresh_automation_bindings(self):
+        """Refresh bindings and requested missing scene definitions; never activate."""
+        restore_requested = self.scene_restore_requested.is_set()
+        if restore_requested:
+            self.scene_restore_requested.clear()
+        try:
+            states = await self.get_ha_states()
+            if restore_requested and (not states or not await self.restore_managed_scenes(states)):
+                self.scene_restore_requested.set()
+        except (Exception, asyncio.CancelledError):
+            if restore_requested:
+                self.scene_restore_requested.set()
+            raise
+        if not states:
+            return
+        automations = []
+        for state in states:
+            entity_id = state.get("entity_id", "")
+            if not entity_id.startswith("automation."):
+                continue
+            attributes = state.get("attributes", {})
+            automations.append({"entity_id": entity_id,
+                "friendly_name": attributes.get("friendly_name", entity_id),
+                "state": state.get("state"), "last_triggered": attributes.get("last_triggered"),
+                "mode": attributes.get("mode")})
+        if automations:
+            automations = await self.enrich_automation_configs(automations)
+            await self.push_scenes_to_cloud([], automations)
+
     async def scene_sync_loop(self):
         """Periodically sync scenes and automations from HA to cloud."""
         logger.info("Starting scene/automation sync loop")
@@ -739,6 +855,8 @@ class LapaHubAddon:
     async def sync_scenes_and_automations(self):
         """Sync all scenes and automations from Home Assistant."""
         states = await self.get_ha_states()
+        if states:
+            await self.restore_managed_scenes(states)
 
         if not states:
             return
@@ -783,7 +901,7 @@ class LapaHubAddon:
         """Fetch full automation configs from HA via WebSocket API."""
         logger.info(f"Fetching automation configs for {len(automations)} automations")
         try:
-            ws_url = "ws://supervisor/core/websocket"
+            ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
 
             async with self.session.ws_connect(ws_url) as ws:
                 # Auth sequence
@@ -814,12 +932,12 @@ class LapaHubAddon:
 
                     try:
                         response = await asyncio.wait_for(ws.receive_json(), timeout=5)
-                        # Log first response for debugging
-                        if msg_id == 1:
-                            logger.info(f"First automation config response: {str(response)[:500]}")
                         if response.get("success") and response.get("result"):
                             # Config is nested under result.config
                             config = response["result"].get("config", response["result"])
+                            automation["config_id"] = config.get("id")
+                            if isinstance(config.get("id"), str) and config["id"].startswith("lapahub_"):
+                                automation["observed_config"] = config
                             # Convert HA config format to LapaHub format
                             # HA uses plural keys: triggers, conditions, actions (or singular for older format)
                             triggers = config.get("triggers") or config.get("trigger", [])
@@ -1077,195 +1195,155 @@ class LapaHubAddon:
         except Exception as e:
             logger.warning(f"Could not push scenes to cloud: {e}")
 
-    async def trigger_scene(self, entity_id: str) -> bool:
-        """Trigger a scene in Home Assistant."""
-        return await self.call_ha_service("scene", "turn_on", {"entity_id": entity_id})
+    async def restore_managed_scenes(self, states):
+        """Restore missing definitions after HA reload/restart. Never activate them."""
+        present = {state.get("entity_id") for state in states}
+        restored = True
+        async with self.scene_lock:
+            for entity_id, definition in self.managed_scenes.active().items():
+                members = definition.get("entities")
+                if not isinstance(members, dict) or not members or any(
+                        not isinstance(member, str) or member.startswith("camera.") for member in members):
+                    # Retain legacy rows untouched, but never recreate view-only members.
+                    restored = False
+                    continue
+                if entity_id not in present:
+                    accepted = await self.call_ha_service("scene", "create", definition)
+                    if not accepted:
+                        restored = False
+                        logger.warning("Managed scene definition could not be restored: %s", entity_id)
+        return restored
+
+    async def trigger_scene(self, entity_id: str, expires_at=None) -> bool:
+        """Ensure a managed definition exists, then dispatch one activation."""
+        async with self.scene_lock:
+            check_command_deadline(expires_at)
+            definition = self.managed_scenes.active().get(entity_id)
+            if definition:
+                members = definition.get("entities")
+                if not isinstance(members, dict) or not members:
+                    return False
+                if any(not isinstance(member, str) or member.startswith("camera.") for member in members):
+                    raise ValueError("Cameras support viewing only; scene rejected")
+                states = await self.get_ha_states()
+                if not states:
+                    return False
+                if entity_id not in {state.get("entity_id") for state in states}:
+                    check_command_deadline(expires_at)
+                    if not await self.call_ha_service("scene", "create", definition):
+                        return False
+            else:
+                # Imported scenes need current, complete HA membership before any run.
+                states = await self.get_ha_states()
+                scene = next((state for state in states or [] if state.get("entity_id") == entity_id), None)
+                members = (scene or {}).get("attributes", {}).get("entity_id")
+                if not isinstance(members, list) or not members or any(not isinstance(member, str) for member in members):
+                    return False
+                if any(member.startswith("camera.") for member in members):
+                    raise ValueError("Cameras support viewing only; scene rejected")
+            # HA lookups/restoration and another scene action may consume the
+            # confirmation window. Never activate stale intent after preflight.
+            check_command_deadline(expires_at)
+            return await self.call_ha_service("scene", "turn_on", {"entity_id": entity_id})
 
     async def toggle_automation(self, entity_id: str, enable: bool) -> bool:
         """Enable or disable an automation."""
         service = "turn_on" if enable else "turn_off"
         return await self.call_ha_service("automation", service, {"entity_id": entity_id})
 
-    async def create_automation(self, automation_id: str, config: dict) -> bool:
-        """Create or update an automation in Home Assistant via WebSocket.
+    async def _write_automation_config(self, automation_id: str, config=None, expires_at=None) -> bool:
+        """Use HA's admin REST config API; acceptance does not prove reload completion.
 
-        Args:
-            automation_id: The HA automation ID (e.g., 'lapahub_abc123')
-            config: The HA automation config (with alias, trigger, condition, action)
-
-        Returns:
-            True if successful, False otherwise
+        Contract: Home Assistant core 2026.10.4 components/config/{automation,view}.py.
+        Never retry uncertain mutations here: the durable command journal owns replay.
         """
+        if (not isinstance(automation_id, str) or not automation_id.startswith("lapahub_")
+                or len(automation_id) > 160
+                or not all(c in "abcdefghijklmnopqrstuvwxyz0123456789_" for c in automation_id)):
+            raise ValueError("Only explicit LapaHub automation configuration IDs may be changed")
+        check_command_deadline(expires_at)
+        request = self.session.delete if config is None else self.session.post
+        kwargs = {
+            "headers": {"Authorization": f"Bearer {SUPERVISOR_TOKEN}", "Content-Type": "application/json"},
+            "timeout": aiohttp.ClientTimeout(total=30),
+        }
+        if config is not None:
+            kwargs["json"] = config
         try:
-            ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
-            logger.info(f"Creating automation '{automation_id}' via WebSocket")
-
-            async with self.session.ws_connect(ws_url) as ws:
-                # Auth sequence
-                msg = await ws.receive_json()
-                if msg.get("type") != "auth_required":
-                    logger.warning(f"Unexpected WS message: {msg}")
+            async with request(f"{HA_BASE_URL}/api/config/automation/config/{automation_id}", **kwargs) as resp:
+                if resp.status != 200:
+                    logger.error("HA automation config rejected (%s)", resp.status)
                     return False
+                result = await resp.json()
+                accepted = isinstance(result, dict) and result.get("result") == "ok"
+                if accepted:
+                    self.automation_refresh_wake.set()
+                return accepted
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A response can be lost after HA has persisted the configuration.
+            # Preserve uncertainty instead of recording a definitive rejection.
+            logger.exception("HA automation configuration outcome uncertain")
+            raise
 
-                await ws.send_json({
-                    "type": "auth",
-                    "access_token": SUPERVISOR_TOKEN,
-                })
+    async def create_automation(self, automation_id: str, config: dict, expires_at=None) -> bool:
+        """Persist a managed automation; HA schedules its reload asynchronously."""
+        return await self._write_automation_config(automation_id, config, expires_at)
 
-                msg = await ws.receive_json()
-                if msg.get("type") != "auth_ok":
-                    logger.warning(f"WS auth failed: {msg}")
-                    return False
+    async def delete_automation(self, automation_id: str, expires_at=None) -> bool:
+        """Delete a managed automation through the same durable REST config API."""
+        return await self._write_automation_config(automation_id, expires_at=expires_at)
 
-                # Create/update automation config
-                # HA expects the config at config/automation/config/{automation_id}
-                await ws.send_json({
-                    "id": 1,
-                    "type": "automation/config",
-                    "automation_id": automation_id,
-                    "config": config,
-                })
-
-                msg = await ws.receive_json()
-                if msg.get("success"):
-                    logger.info(f"Automation '{automation_id}' created successfully")
-                    self.log_activity(f"Created automation: {config.get('alias', automation_id)}")
-                    return True
-                else:
-                    error = msg.get("error", {}).get("message", "Unknown error")
-                    logger.error(f"Failed to create automation: {error}")
-                    return False
-
-        except Exception as e:
-            logger.error(f"Error creating automation: {e}")
-            return False
-
-    async def delete_automation(self, automation_id: str) -> bool:
-        """Delete an automation from Home Assistant via WebSocket.
-
-        Args:
-            automation_id: The HA automation ID (e.g., 'lapahub_abc123')
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
-            logger.info(f"Deleting automation '{automation_id}' via WebSocket")
-
-            async with self.session.ws_connect(ws_url) as ws:
-                # Auth sequence
-                msg = await ws.receive_json()
-                if msg.get("type") != "auth_required":
-                    return False
-
-                await ws.send_json({
-                    "type": "auth",
-                    "access_token": SUPERVISOR_TOKEN,
-                })
-
-                msg = await ws.receive_json()
-                if msg.get("type") != "auth_ok":
-                    return False
-
-                # Delete automation
-                await ws.send_json({
-                    "id": 1,
-                    "type": "automation/delete",
-                    "automation_id": automation_id,
-                })
-
-                msg = await ws.receive_json()
-                if msg.get("success"):
-                    logger.info(f"Automation '{automation_id}' deleted successfully")
-                    self.log_activity(f"Deleted automation: {automation_id}")
-                    return True
-                else:
-                    error = msg.get("error", {}).get("message", "Unknown error")
-                    logger.error(f"Failed to delete automation: {error}")
-                    return False
-
-        except Exception as e:
-            logger.error(f"Error deleting automation: {e}")
-            return False
-
-    async def create_scene(self, scene_id: str, entities: dict = None, snapshot_entities: list = None, scene_name: str = None) -> bool:
-        """Create a scene in Home Assistant via scene.create service.
-
-        The scene.create service can either:
-        1. Use explicit entity states (entities dict)
-        2. Snapshot current states of specified entities (snapshot_entities list)
-
-        Args:
-            scene_id: The scene ID (e.g., 'lapahub_abc123')
-            entities: Dict mapping entity_id to desired state (optional)
-            snapshot_entities: List of entity_ids to snapshot current state (optional)
-            scene_name: Friendly name for the scene (optional)
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            logger.info(f"Creating scene '{scene_id}' via scene.create service")
-
-            # Build service data
-            service_data = {
-                "scene_id": f"lapahub_{scene_id}",
+    async def create_scene(self, scene_id: str, entities: dict = None, snapshot_entities: list = None, scene_name: str = None, expires_at=None) -> bool:
+        """Create a dynamic scene and durably retain confirmed explicit states."""
+        # Check both inputs, including an otherwise ignored snapshot argument.
+        # Reject the whole operation before reading HA state or copying attributes.
+        members = list(entities or {}) + list(snapshot_entities or [])
+        if any(not isinstance(member, str) or member.startswith("camera.") for member in members):
+            raise ValueError("Cameras support viewing only; scene rejected")
+        if scene_id.startswith("scene.") and not scene_id.startswith("scene.lapahub_"):
+            raise ValueError("Imported HA scenes cannot be replaced by LapaHub")
+        slug = scene_id.removeprefix("scene.").replace("-", "_")
+        if not slug.startswith("lapahub_"):
+            slug = "lapahub_" + slug
+        service_data = {"scene_id": slug}
+        if entities:
+            service_data["entities"] = entities
+        elif snapshot_entities:
+            # Resolve snapshots once; a restart must not snapshot different states.
+            states = await self.get_ha_states()
+            by_id = {state["entity_id"]: state for state in states}
+            if any(entity not in by_id for entity in snapshot_entities):
+                return False
+            if any(by_id[entity].get("entity_id", "").startswith("camera.") or
+                   by_id[entity].get("domain") == "camera" for entity in snapshot_entities):
+                raise ValueError("Cameras support viewing only; scene rejected")
+            service_data["entities"] = {
+                entity: {**by_id[entity].get("attributes", {}), "state": by_id[entity]["state"]}
+                for entity in snapshot_entities
             }
-
-            if entities:
-                # Use explicit entity states
-                service_data["entities"] = entities
-            elif snapshot_entities:
-                # Snapshot current states of specified entities
-                service_data["snapshot_entities"] = snapshot_entities
-
-            success = await self.call_ha_service("scene", "create", service_data)
-
-            if success:
+        else:
+            return False
+        async with self.scene_lock:
+            check_command_deadline(expires_at)
+            accepted = await self.call_ha_service("scene", "create", service_data)
+            if accepted:
+                self.managed_scenes.save("scene." + slug, service_data)
                 self.log_activity(f"Created scene: {scene_name or scene_id}")
+            return accepted
 
-            return success
-
-        except Exception as e:
-            logger.error(f"Error creating scene: {e}")
-            return False
-
-    async def delete_scene(self, scene_id: str) -> bool:
-        """Delete a scene from Home Assistant via scene.delete service.
-
-        Note: HA doesn't have a native scene.delete service for dynamically created scenes.
-        We can use homeassistant.reload_scenes after deleting from scenes.yaml,
-        but for dynamically created scenes (via scene.create), they persist until HA restart.
-
-        For now, we'll log a warning since dynamic scene deletion isn't fully supported.
-
-        Args:
-            scene_id: The scene ID (e.g., 'lapahub_abc123')
-
-        Returns:
-            True if scene was handled, False on error
-        """
-        try:
-            # For dynamically created scenes (scene.create), HA doesn't have a direct delete
-            # The best approach is to call homeassistant.update_entity to remove it
-            # or accept that it will be cleaned up on HA restart
-
-            entity_id = f"scene.lapahub_{scene_id}" if not scene_id.startswith("scene.") else scene_id
-
-            logger.info(f"Scene delete requested for '{entity_id}'")
-            logger.warning(
-                f"HA doesn't support deleting dynamically created scenes. "
-                f"Scene '{entity_id}' will be removed on HA restart."
-            )
-            self.log_activity(f"Scene marked for deletion: {scene_id} (removed on HA restart)")
-
-            # Return True to indicate the command was handled (even though we can't truly delete)
-            return True
-
-        except Exception as e:
-            logger.error(f"Error handling scene delete: {e}")
-            return False
+    async def delete_scene(self, scene_id: str, expires_at=None) -> bool:
+        """Suppress persistent restoration before asking HA to delete a scene."""
+        if scene_id.startswith("scene.") and not scene_id.startswith("scene.lapahub_"):
+            raise ValueError("Imported HA scenes cannot be deleted by LapaHub")
+        entity_id = scene_id if scene_id.startswith("scene.") else (
+            "scene." + (scene_id if scene_id.startswith("lapahub_") else "lapahub_" + scene_id).replace("-", "_")
+        )
+        async with self.scene_lock:
+            check_command_deadline(expires_at)
+            self.managed_scenes.suppress(entity_id)
+            return await self.call_ha_service("scene", "delete", {"entity_id": entity_id})
 
     async def get_ha_states(self) -> list:
         """Get all entity states from Home Assistant."""
@@ -1401,17 +1479,47 @@ class LapaHubAddon:
 
     async def call_ha_service(self, domain: str, service: str, data: dict) -> bool:
         """Call a Home Assistant service."""
+        targets = data.get("entity_id", [])
+        if isinstance(targets, str):
+            targets = targets.split(",")
+        if domain == "camera" or (isinstance(targets, (list, tuple)) and any(
+                isinstance(target, str) and target.strip().startswith("camera.") for target in targets)):
+            return False
+        if domain == "scene" and any(isinstance(member, str) and member.startswith("camera.")
+                for member in list(data.get("entities") or {}) + list(data.get("snapshot_entities") or [])):
+            return False
+        from reliability import active_command
+        from ha_target import require_live_target, TargetNotDispatched
+        context = active_command.get()
+        import time
+        expires_at = context["expires_at"] if context else None
+        target = data.get("entity_id")
+        if context and not context["preflight_started"]:
+            context["journal"].preflight_started(context["id"])
+            context["preflight_started"] = True
+        if target is not None:
+            await require_live_target(self.session, HA_BASE_URL, SUPERVISOR_TOKEN, target, domain, expires_at)
+        elif (domain, service) != ("scene", "create"):
+            raise TargetNotDispatched("missing_target")
+        check_command_deadline(expires_at)
+        if context and not context["dispatched"]:
+            context["journal"].dispatched(context["id"])
         headers = {
             "Authorization": f"Bearer {SUPERVISOR_TOKEN}",
             "Content-Type": "application/json",
         }
 
         try:
+            check_command_deadline(expires_at)
+            post_budget = 30 if expires_at is None else min(30, float(expires_at) - time.time())
+            check_command_deadline(expires_at)
+            if context:
+                context["dispatched"] = True
             async with self.session.post(
                 f"{HA_BASE_URL}/api/services/{domain}/{service}",
                 headers=headers,
                 json=data,
-                timeout=aiohttp.ClientTimeout(total=30),
+                timeout=aiohttp.ClientTimeout(total=post_budget),
             ) as resp:
                 if resp.status in (200, 201):
                     logger.info(f"Service called: {domain}.{service}")
@@ -1419,6 +1527,8 @@ class LapaHubAddon:
                 else:
                     logger.error(f"Service call failed: {resp.status}")
                     return False
+        except CommandExpired:
+            raise
         except Exception as e:
             logger.error(f"Error calling service: {e}")
             return False
@@ -1623,7 +1733,9 @@ class LapaHubAddon:
         # Filter to relevant domains
         relevant_domains = [
             "switch", "light", "climate", "cover", "fan",
-            "sensor", "binary_sensor", "lock", "media_player",
+            "sensor", "binary_sensor", "lock", "media_player", "camera",
+            "input_boolean", "siren", "remote", "button", "vacuum",
+            "water_heater", "humidifier", "valve",
         ]
 
         devices = []
@@ -1635,7 +1747,12 @@ class LapaHubAddon:
             if domain not in relevant_domains:
                 continue
 
+            if domain == "camera" and not getattr(self, "camera_live_enabled", False):
+                continue
+
             attributes = state.get("attributes", {})
+            if domain == "camera":
+                attributes = safe_camera_attributes(attributes)
 
             # Get device_id from entity registry mapping (populated during sync_physical_devices)
             device_id = self.entity_device_map.get(entity_id)
@@ -1653,7 +1770,7 @@ class LapaHubAddon:
                 "domain": domain,
                 "friendly_name": attributes.get("friendly_name", entity_id),
                 "device_class": attributes.get("device_class"),
-                "state": state.get("state"),
+                "state": safe_camera_state(state.get("state")) if domain == "camera" else state.get("state"),
                 "attributes": attributes,
                 "last_updated": state.get("last_updated"),
                 # Parent device linkage (new fields for hierarchical view)
@@ -1752,7 +1869,7 @@ class LapaHubAddon:
 
         async with self.session.get(
             api_url,
-            params={"hubId": self.hub_id},
+            params={"hubId": self.hub_id, "commandProtocol": "2"},
             headers={
                 "Authorization": f"Bearer {self.firebase_credentials.get('token', '')}",
                 "Accept": "text/event-stream",
@@ -1803,6 +1920,10 @@ class LapaHubAddon:
                 commands = payload.get("commands", [])
                 if commands:
                     logger.info(f"SSE: received {len(commands)} command(s)")
+                    received_at = datetime.now(timezone.utc).timestamp()
+                    for cmd in commands:
+                        cmd['_received_at'] = received_at
+                        logger.info("Command received id=%s intent=%s", cmd.get('id'), cmd.get('clientIntentId'))
                     for cmd in commands:
                         await self.execute_command(cmd)
             except json.JSONDecodeError as e:
@@ -1812,8 +1933,8 @@ class LapaHubAddon:
         elif event_type == "heartbeat":
             pass  # Keep-alive, no action needed
         elif event_type == "error":
-            logger.warning(f"SSE: server error: {data_str}")
-            raise Exception(f"SSE server error: {data_str}")
+            logger.warning("SSE: server returned an error event")
+            raise Exception("SSE server returned an error event")
         else:
             logger.debug(f"SSE: unknown event type '{event_type}'")
 
@@ -1826,17 +1947,65 @@ class LapaHubAddon:
 
         async with self.session.get(
             api_url,
-            params={"hubId": self.hub_id},
+            params={"hubId": self.hub_id, "commandProtocol": "2"},
             headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
             timeout=aiohttp.ClientTimeout(total=30),
         ) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 commands = data.get("commands", [])
+                received_at = datetime.now(timezone.utc).timestamp()
+                for cmd in commands:
+                    cmd['_received_at'] = received_at
+                    logger.info("Command received id=%s intent=%s", cmd.get('id'), cmd.get('clientIntentId'))
                 for cmd in commands:
                     await self.execute_command(cmd)
 
     async def execute_command(self, command: dict):
+        from reliability import active_command
+        from ha_target import TargetNotDispatched
+        context_token = None
+        cmd_id = command.get("id")
+        claimed = False
+        try:
+            if not self.command_journal.claim(command):
+                logger.info("Duplicate command %s suppressed", cmd_id)
+                return
+            claimed = True
+            context_token = active_command.set({"journal": self.command_journal, "id": cmd_id,
+                "expires_at": command.get("expires_at"), "preflight_started": False, "dispatched": False})
+            check_command_deadline(command.get("expires_at"))
+            await self._execute_command_once(command)
+        except TargetNotDispatched as error:
+            context = active_command.get()
+            already_dispatched = bool(context and context["dispatched"])
+            if claimed:
+                if not already_dispatched:
+                    self.command_journal.preflight_started(cmd_id)
+                self.command_journal.complete(cmd_id, "unknown" if already_dispatched else "failed")
+            logger.warning("Command %s target preflight rejected (%s); prior dispatch=%s", cmd_id, str(error), already_dispatched)
+        except CommandExpired:
+            context = active_command.get()
+            already_dispatched = bool(context and context["dispatched"])
+            if claimed:
+                if not already_dispatched:
+                    self.command_journal.preflight_started(cmd_id)
+                self.command_journal.complete(cmd_id, "unknown" if already_dispatched else "expired")
+            logger.warning("Expired command %s rejected", cmd_id)
+        except asyncio.CancelledError:
+            # Keep the pre-dispatch receipt durable; restart resolves it as unknown.
+            raise
+        except Exception:
+            logger.exception("Command %s could not complete", cmd_id)
+            # Do not blindly retry a command whose physical effect is uncertain.
+            if claimed:
+                self.command_journal.complete(cmd_id, "unknown")
+
+        finally:
+            if context_token is not None:
+                active_command.reset(context_token)
+
+    async def _execute_command_once(self, command: dict):
         """Execute a command from the cloud.
 
         Handles both standard device commands and special automation/scene commands:
@@ -1851,9 +2020,12 @@ class LapaHubAddon:
         - automation.toggle: Enable/disable an automation
         """
         cmd_id = command.get("id")
-        entity_id = command.get("entity_id", "")
-        action = command.get("action")
         params = command.get("params", {})
+        entity_id = command.get("entity_id") or params.get("entity_id", "")
+        action = command.get("action")
+        if ((isinstance(entity_id, str) and entity_id.startswith("camera.")) or
+                (isinstance(action, str) and action.startswith("camera."))):
+            raise ValueError("Cameras support viewing only; control rejected")
 
         logger.info(f"Executing command {cmd_id}: {action} on {entity_id or 'N/A'}")
         success = False
@@ -1864,7 +2036,7 @@ class LapaHubAddon:
             automation_id = params.get("automation_id")
             config = params.get("config", {})
             if automation_id and config:
-                success = await self.create_automation(automation_id, config)
+                success = await self.create_automation(automation_id, config, expires_at=command.get("expires_at"))
             else:
                 logger.error("automation.create requires automation_id and config in params")
 
@@ -1873,7 +2045,7 @@ class LapaHubAddon:
             automation_id = params.get("automation_id")
             config = params.get("config", {})
             if automation_id and config:
-                success = await self.create_automation(automation_id, config)
+                success = await self.create_automation(automation_id, config, expires_at=command.get("expires_at"))
             else:
                 logger.error("automation.update requires automation_id and config in params")
 
@@ -1881,14 +2053,14 @@ class LapaHubAddon:
             # Delete an automation
             automation_id = params.get("automation_id")
             if automation_id:
-                success = await self.delete_automation(automation_id)
+                success = await self.delete_automation(automation_id, expires_at=command.get("expires_at"))
             else:
                 logger.error("automation.delete requires automation_id in params")
 
         elif action == "automation.trigger":
             # Manually trigger an automation
             if entity_id:
-                success = await self.call_ha_service("automation", "trigger", {"entity_id": entity_id})
+                success = await self.call_ha_service("automation", "trigger", {"entity_id": entity_id, "skip_condition": False})
             else:
                 logger.error("automation.trigger requires entity_id")
 
@@ -1913,7 +2085,8 @@ class LapaHubAddon:
                     scene_id=scene_id,
                     entities=entities,
                     snapshot_entities=snapshot_entities,
-                    scene_name=scene_name
+                    scene_name=scene_name,
+                    expires_at=command.get("expires_at"),
                 )
             else:
                 logger.error("scene.create requires scene_id and either entities or snapshot_entities")
@@ -1930,23 +2103,24 @@ class LapaHubAddon:
                     scene_id=scene_id,
                     entities=entities,
                     snapshot_entities=snapshot_entities,
-                    scene_name=scene_name
+                    scene_name=scene_name,
+                    expires_at=command.get("expires_at"),
                 )
             else:
                 logger.error("scene.update requires scene_id and either entities or snapshot_entities")
 
         elif action == "scene.delete":
             # Delete a scene
-            scene_id = params.get("scene_id")
+            scene_id = params.get("scene_id") or params.get("entity_id")
             if scene_id:
-                success = await self.delete_scene(scene_id)
+                success = await self.delete_scene(scene_id, expires_at=command.get("expires_at"))
             else:
                 logger.error("scene.delete requires scene_id in params")
 
-        elif action == "scene.activate":
+        elif action in ("scene.activate", "scene.turn_on"):
             # Activate a scene
             if entity_id:
-                success = await self.trigger_scene(entity_id)
+                success = await self.trigger_scene(entity_id, expires_at=command.get("expires_at"))
             else:
                 logger.error("scene.activate requires entity_id")
 
@@ -1968,34 +2142,51 @@ class LapaHubAddon:
             }
 
             service = service_map.get(action, action)
-            service_data = {"entity_id": entity_id, **params}
+            if isinstance(service, str) and "." in service:
+                action_domain, service = service.split(".", 1)
+                if action_domain not in (domain, "homeassistant"):
+                    raise ValueError("Command domain does not match target entity")
+            service_data = {**params, "entity_id": entity_id}
 
-            success = await self.call_ha_service(domain, service, service_data)
+            if domain == "scene" and service == "turn_on":
+                success = await self.trigger_scene(entity_id, expires_at=command.get("expires_at"))
+            else:
+                success = await self.call_ha_service(domain, service, service_data)
 
         # Report command result back to cloud
-        await self.report_command_result(cmd_id, success)
+        self.command_journal.complete(cmd_id, "service_accepted" if success else "unknown")
 
-    async def report_command_result(self, cmd_id: str, success: bool):
-        """Report command execution result to cloud."""
+    async def report_command_result(self, cmd_id: str, outcome: str):
+        """Return only after a successful HTTP acknowledgement."""
         if not self.firebase_credentials:
-            return
-
+            raise RuntimeError("No cloud session for acknowledgement")
         api_url = f"https://us-central1-{self.firebase_project}.cloudfunctions.net/reportCommandResult"
+        async with self.session.post(
+            api_url,
+            json={"commandId": cmd_id, "hubId": self.hub_id,
+                  "success": outcome == "service_accepted", "outcome": outcome,
+                  "trace": self.command_journal.trace(cmd_id),
+                  "timestamp": datetime.now(timezone.utc).isoformat()},
+            headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"Acknowledgement HTTP {resp.status}")
 
-        try:
-            await self.session.post(
-                api_url,
-                json={
-                    "commandId": cmd_id,
-                    "hubId": self.hub_id,
-                    "success": success,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
-                headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
-                timeout=aiohttp.ClientTimeout(total=30),
-            )
-        except Exception as e:
-            logger.warning(f"Could not report command result: {e}")
+    async def command_ack_loop(self):
+        delay = 1
+        while self.running:
+            try:
+                for cmd_id, outcome in self.command_journal.pending():
+                    await self.report_command_result(cmd_id, outcome)
+                    self.command_journal.acknowledge(cmd_id)
+                delay = 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.warning("Acknowledgement retained for retry: %s", error)
+                delay = min(delay * 2, 30)
+            await asyncio.sleep(delay)
 
     async def energy_report_loop(self):
         """Periodically report energy data to cloud."""
@@ -2005,7 +2196,6 @@ class LapaHubAddon:
         while self.running:
             try:
                 await self.report_energy()
-                self.last_energy_report = datetime.now(timezone.utc)
                 consecutive_errors = 0  # Reset on success
             except asyncio.CancelledError:
                 raise
@@ -2024,260 +2214,42 @@ class LapaHubAddon:
 
     async def report_energy(self):
         """Collect and report energy data using HA Energy Dashboard config."""
-        # Refresh energy prefs periodically (every 5 minutes or if not loaded)
-        should_refresh = (
-            not self.energy_prefs or
-            not self.energy_prefs_last_fetch or
-            (datetime.now(timezone.utc) - self.energy_prefs_last_fetch) > timedelta(minutes=5)
-        )
-        if should_refresh:
-            await self.fetch_energy_prefs()
-
-        states = await self.get_ha_states()
-
-        if not states:
-            return
-
-        # Build state lookup for fast access - handle both entity_id and stat_id formats
-        state_lookup = {}
-        for s in states:
-            entity_id = s.get("entity_id", "")
-            state_lookup[entity_id] = s
-            # Also index without "sensor." prefix for stat_id matching
-            if entity_id.startswith("sensor."):
-                state_lookup[entity_id[7:]] = s
-
-        energy_data = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "sensors": {},
-            "dashboard_sources": {},  # Mapped from HA Energy Dashboard
-        }
-
-        # Debug: log energy_prefs status
-        logger.info(f"energy_prefs status: exists={self.energy_prefs is not None}, "
-                    f"last_fetch={self.energy_prefs_last_fetch}")
-        if self.energy_prefs:
-            logger.info(f"energy_prefs keys: {list(self.energy_prefs.keys())}")
-
-        # If we have Energy Dashboard preferences, use those sensors explicitly
-        if self.energy_prefs:
-            sources = self.energy_prefs.get("energy_sources", [])
-            logger.info(f"Processing {len(sources)} energy sources from dashboard config")
-
-            # Debug: log first few state_lookup keys
-            sample_keys = list(state_lookup.keys())[:10]
-            logger.info(f"Sample state_lookup keys: {sample_keys}")
-
-            for source in sources:
-                source_type = source.get("type")
-
-                # Handle grid sources specially - they use flow_from/flow_to/power structure
-                if source_type == "grid":
-                    power_sensor = None  # Initialize before use
-                    # Log the full grid source config for debugging
-                    logger.info(f"Grid source config: {json.dumps(source, default=str)}")
-
-                    # Grid has flow_from (import) and flow_to (export) as arrays
-                    # and optionally a direct "power" sensor (which is also a list of objects)
-                    power_config = source.get("power")
-                    if power_config:
-                        logger.info(f"Grid power config: {power_config}")
-                        # power is a list of objects with stat_rate field
-                        if isinstance(power_config, list):
-                            for power_item in power_config:
-                                power_sensor = power_item.get("stat_rate") if isinstance(power_item, dict) else None
-                                if power_sensor and power_sensor in state_lookup:
-                                    state = state_lookup[power_sensor]
-                                    state_value = state.get("state", "")
-                                    if state_value not in ("unknown", "unavailable", ""):
-                                        energy_data["dashboard_sources"][power_sensor] = {
-                                            "type": "grid",
-                                            "value": float(state_value),
-                                            "unit": state.get("attributes", {}).get("unit_of_measurement"),
-                                            "friendly_name": state.get("attributes", {}).get("friendly_name"),
-                                            "is_power_sensor": True,
-                                        }
-                                        logger.info(f"Found grid power sensor: {power_sensor} = {state_value}")
-                        elif isinstance(power_config, str) and power_config in state_lookup:
-                            # Handle case where power is a simple string (older format)
-                            state = state_lookup[power_config]
-                            state_value = state.get("state", "")
-                            if state_value not in ("unknown", "unavailable", ""):
-                                energy_data["dashboard_sources"][power_config] = {
-                                    "type": "grid",
-                                    "value": float(state_value),
-                                    "unit": state.get("attributes", {}).get("unit_of_measurement"),
-                                    "friendly_name": state.get("attributes", {}).get("friendly_name"),
-                                    "is_power_sensor": True,
-                                }
-                                logger.info(f"Found grid power sensor: {power_config} = {state_value}")
-
-                    # Process flow_from (grid import) entries
-                    flow_from = source.get("flow_from", [])
-                    for flow in flow_from:
-                        stat_id = flow.get("stat_energy_from")
-                        if stat_id and stat_id in state_lookup:
-                            state = state_lookup[stat_id]
-                            try:
-                                state_value = state.get("state", "")
-                                if state_value not in ("unknown", "unavailable", ""):
-                                    energy_data["dashboard_sources"][stat_id] = {
-                                        "type": "grid",
-                                        "subtype": "import",
-                                        "value": float(state_value),
-                                        "unit": state.get("attributes", {}).get("unit_of_measurement"),
-                                        "friendly_name": state.get("attributes", {}).get("friendly_name"),
-                                    }
-                                    logger.info(f"Found grid import sensor: {stat_id}")
-                            except (ValueError, TypeError):
-                                pass
-
-                    # Process flow_to (grid export) entries
-                    flow_to = source.get("flow_to", [])
-                    for flow in flow_to:
-                        stat_id = flow.get("stat_energy_to")
-                        if stat_id and stat_id in state_lookup:
-                            state = state_lookup[stat_id]
-                            try:
-                                state_value = state.get("state", "")
-                                if state_value not in ("unknown", "unavailable", ""):
-                                    energy_data["dashboard_sources"][stat_id] = {
-                                        "type": "grid",
-                                        "subtype": "export",
-                                        "value": float(state_value),
-                                        "unit": state.get("attributes", {}).get("unit_of_measurement"),
-                                        "friendly_name": state.get("attributes", {}).get("friendly_name"),
-                                    }
-                                    logger.info(f"Found grid export sensor: {stat_id}")
-                            except (ValueError, TypeError):
-                                pass
-
-                    logger.info(f"Energy source: type=grid, power={power_sensor}, flow_from={len(flow_from)}, flow_to={len(flow_to)}")
-                    continue
-
-                # For non-grid sources, try multiple stat_id fields
-                stat_id = (
-                    source.get("stat_energy_from") or
-                    source.get("stat_energy_to") or
-                    source.get("entity_id") or
-                    source.get("stat_compensation")
-                )
-
-                logger.info(f"Energy source: type={source_type}, stat_id={stat_id}, source_keys={list(source.keys())}")
-
-                if not stat_id:
-                    continue
-
-                # Try to find the state - handle various stat_id formats
-                state = None
-                # Direct lookup
-                if stat_id in state_lookup:
-                    state = state_lookup[stat_id]
-                    logger.info(f"Found {stat_id} via direct lookup")
-                # Try with sensor. prefix
-                elif f"sensor.{stat_id}" in state_lookup:
-                    state = state_lookup[f"sensor.{stat_id}"]
-                    logger.info(f"Found {stat_id} via sensor. prefix")
-                # Try stripping recorder: prefix
-                elif stat_id.startswith("recorder:"):
-                    clean_id = stat_id.replace("recorder:", "")
-                    if clean_id in state_lookup:
-                        state = state_lookup[clean_id]
-                        logger.info(f"Found {stat_id} via recorder: strip")
-                else:
-                    logger.warning(f"Could not find {stat_id} in state_lookup")
-
-                if state:
-                    try:
-                        state_value = state.get("state", "")
-                        if state_value not in ("unknown", "unavailable", ""):
-                            value = float(state_value)
-                            energy_data["dashboard_sources"][stat_id] = {
-                                "type": source_type,  # solar, grid, battery, gas
-                                "value": value,
-                                "unit": state.get("attributes", {}).get("unit_of_measurement"),
-                                "friendly_name": state.get("attributes", {}).get("friendly_name"),
-                            }
-                    except (ValueError, TypeError) as e:
-                        logger.debug(f"Could not parse {stat_id}: {e}")
-                else:
-                    logger.debug(f"Energy source {stat_id} not found in states")
-
-            # Also check for device consumption sensors
-            device_consumption = self.energy_prefs.get("device_consumption", [])
-            for device in device_consumption:
-                stat_id = device.get("stat_consumption")
-                if stat_id and stat_id in state_lookup:
-                    state = state_lookup[stat_id]
-                    try:
-                        state_value = state.get("state", "")
-                        if state_value not in ("unknown", "unavailable", ""):
-                            value = float(state_value)
-                            energy_data["dashboard_sources"][stat_id] = {
-                                "type": "device",
-                                "value": value,
-                                "unit": state.get("attributes", {}).get("unit_of_measurement"),
-                                "friendly_name": state.get("attributes", {}).get("friendly_name"),
-                            }
-                    except (ValueError, TypeError):
-                        pass
-
-            if energy_data["dashboard_sources"]:
-                logger.info(f"Using {len(energy_data['dashboard_sources'])} Energy Dashboard sources")
-            elif sources:
-                logger.warning(f"Energy Dashboard has {len(sources)} sources but none matched current states")
-
-        # Also collect all energy-related sensors as backup (for pattern matching fallback)
-        energy_classes = ["energy", "power", "voltage", "current", "battery"]
-
-        for state in states:
-            entity_id = state.get("entity_id", "")
-            if not entity_id.startswith("sensor."):
-                continue
-
-            attributes = state.get("attributes", {})
-            device_class = attributes.get("device_class")
-
-            if device_class in energy_classes:
-                try:
-                    state_value = state.get("state", "")
-                    if state_value not in ("unknown", "unavailable", ""):
-                        value = float(state_value)
-                        energy_data["sensors"][entity_id] = {
-                            "value": value,
-                            "unit": attributes.get("unit_of_measurement"),
-                            "device_class": device_class,
-                            "friendly_name": attributes.get("friendly_name"),
-                        }
-                except (ValueError, TypeError):
-                    pass
-
-        source_count = len(energy_data.get("dashboard_sources", {}))
-        sensor_count = len(energy_data.get("sensors", {}))
-        logger.info(f"Collected {source_count} dashboard sources, {sensor_count} sensors")
-        await self.push_energy_to_cloud(energy_data)
+        # Retry the exact snapshot first: a delivery failure must not relabel old
+        # measurements with a new observation time or silently discard them.
+        pending = getattr(self, "pending_energy_report", None)
+        if pending is None:
+            if (not self.energy_prefs_last_fetch or
+                    datetime.now(timezone.utc) - self.energy_prefs_last_fetch > timedelta(minutes=5)):
+                await self.fetch_energy_prefs()
+            states = await self.get_ha_states()
+            if not states:
+                raise RuntimeError("No Home Assistant states available for energy report")
+            pending = collect_energy_payload(states, self.energy_prefs or {})
+            self.pending_energy_report = pending
+        try:
+            await self.push_energy_to_cloud(pending)
+        except EnergyDeliveryError as error:
+            if error.permanent:
+                logger.error("Discarding permanently rejected energy snapshot: %s", error)
+                self.pending_energy_report = None
+            raise
+        self.last_energy_report = datetime.fromisoformat(pending["timestamp"])
+        self.pending_energy_report = None
 
     async def push_energy_to_cloud(self, energy_data: dict):
         """Push energy data to LapaHub cloud."""
-        if not self.firebase_credentials:
-            logger.debug("Skipping energy push (no credentials)")
-            return
-
+        if not self.firebase_credentials or not self.firebase_credentials.get("token"):
+            raise RuntimeError("Energy push requires authenticated credentials")
         api_url = f"https://us-central1-{self.firebase_project}.cloudfunctions.net/reportEnergy"
-
-        try:
-            async with self.session.post(
-                api_url,
-                json={"hubId": self.hub_id, **energy_data},
-                headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
-                if resp.status == 200:
-                    logger.debug("Energy data pushed to cloud")
-                else:
-                    logger.warning(f"Energy push failed: {resp.status}")
-        except Exception as e:
-            logger.warning(f"Could not push energy data: {e}")
+        async with self.session.post(
+            api_url,
+            json={"hubId": self.hub_id, **energy_data},
+            headers={"Authorization": f"Bearer {self.firebase_credentials['token']}"},
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as resp:
+            if resp.status != 200:
+                raise EnergyDeliveryError(resp.status)
+            logger.debug("Energy data pushed to cloud")
 
     async def run_web_server(self):
         """Run the ingress web interface."""
@@ -2595,6 +2567,10 @@ class LapaHubAddon:
             "websocket_connected": self.ha_websocket is not None and not self.ha_websocket.closed,
             "token_expires_at": token_expires,
             "retry_count": self.current_retry_count,
+            "state_publication": {"queued": len(self.state_publisher.pending),
+                                  "active": len(self.state_publisher.active),
+                                  "coalesced": self.state_publisher.coalesced,
+                                  "dropped": self.state_publisher.dropped},
             "uptime_seconds": int(uptime),
             "cpu_percent": cpu_percent,
             "memory_percent": memory.percent if memory else 0,

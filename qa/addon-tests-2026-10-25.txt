@@ -1,0 +1,51 @@
+test_activation_after_reload_restores_definition_before_one_turn_on (test_managed_scenes.ManagedSceneTests.test_activation_after_reload_restores_definition_before_one_turn_on) ... ok
+test_activation_expiring_during_lookup_never_reaches_ha (test_managed_scenes.ManagedSceneTests.test_activation_expiring_during_lookup_never_reaches_ha) ... Expired command expired-lookup rejected
+ok
+test_activation_expiring_during_restore_never_turns_on_or_replays (test_managed_scenes.ManagedSceneTests.test_activation_expiring_during_restore_never_turns_on_or_replays) ... Expired command expired-restore rejected
+ok
+test_confirmed_definition_survives_restart_and_restore_never_activates_devices (test_managed_scenes.ManagedSceneTests.test_confirmed_definition_survives_restart_and_restore_never_activates_devices) ... ok
+test_delete_expiring_while_waiting_does_not_suppress_or_dispatch (test_managed_scenes.ManagedSceneTests.test_delete_expiring_while_waiting_does_not_suppress_or_dispatch) ... Expired command expired-delete rejected
+ok
+test_deleted_scene_is_not_restored_even_if_delete_response_is_lost (test_managed_scenes.ManagedSceneTests.test_deleted_scene_is_not_restored_even_if_delete_response_is_lost) ... ok
+test_existing_scene_is_not_recreated (test_managed_scenes.ManagedSceneTests.test_existing_scene_is_not_recreated) ... ok
+test_imported_scene_cannot_be_silently_replaced_or_deleted (test_managed_scenes.ManagedSceneTests.test_imported_scene_cannot_be_silently_replaced_or_deleted) ... ok
+test_mocked_scene_crud_retains_edit_after_restart_and_delete_stays_deleted (test_managed_scenes.ManagedSceneTests.test_mocked_scene_crud_retains_edit_after_restart_and_delete_stays_deleted) ... ok
+test_snapshot_expiring_during_lookup_does_not_create (test_managed_scenes.ManagedSceneTests.test_snapshot_expiring_during_lookup_does_not_create) ... Expired command expired-snapshot rejected
+ok
+test_snapshot_is_resolved_once_and_persisted_as_explicit_states (test_managed_scenes.ManagedSceneTests.test_snapshot_is_resolved_once_and_persisted_as_explicit_states) ... ok
+test_uncertain_creation_does_not_replace_last_confirmed_definition (test_managed_scenes.ManagedSceneTests.test_uncertain_creation_does_not_replace_last_confirmed_definition) ... ok
+test_expired_instruction_never_reaches_ha (test_reliability.ExecutorTests.test_expired_instruction_never_reaches_ha) ... Expired command trace-real rejected
+ok
+test_failed_ack_is_retained_then_retried_without_ha_execution (test_reliability.ExecutorTests.test_failed_ack_is_retained_then_retried_without_ha_execution) ... Acknowledgement retained for retry: HTTP 500
+ok
+test_failed_service_response_preserves_uncertain_outcome (test_reliability.ExecutorTests.test_failed_service_response_preserves_uncertain_outcome) ... ok
+test_http_error_is_not_an_acknowledgement (test_reliability.ExecutorTests.test_http_error_is_not_an_acknowledgement) ... ok
+test_redelivery_calls_ha_only_once (test_reliability.ExecutorTests.test_redelivery_calls_ha_only_once) ... ok
+test_root_command_cannot_redirect_entity_through_service_data (test_reliability.ExecutorTests.test_root_command_cannot_redirect_entity_through_service_data) ... ok
+test_scene_and_automation_targets_are_read_from_callable_envelope (test_reliability.ExecutorTests.test_scene_and_automation_targets_are_read_from_callable_envelope) ... ok
+test_uncertain_service_exception_does_not_replay (test_reliability.ExecutorTests.test_uncertain_service_exception_does_not_replay) ... Command trace-real could not complete
+Traceback (most recent call last):
+  File "/workspace/lapahub-addon/lapahub/rootfs/app/run.py", line 1863, in execute_command
+    await self._execute_command_once(command)
+  File "/workspace/lapahub-addon/lapahub/rootfs/app/run.py", line 2017, in _execute_command_once
+    success = await self.call_ha_service(domain, service, service_data)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py", line 2291, in _execute_mock_call
+    raise effect
+TimeoutError: response lost
+ok
+test_acknowledgement_survives_restart (test_reliability.JournalTests.test_acknowledgement_survives_restart) ... ok
+test_capacity_refuses_untracked_execution (test_reliability.JournalTests.test_capacity_refuses_untracked_execution) ... ok
+test_duplicate_does_not_dispatch_again (test_reliability.JournalTests.test_duplicate_does_not_dispatch_again) ... ok
+test_id_reuse_rejected_without_overwriting_result (test_reliability.JournalTests.test_id_reuse_rejected_without_overwriting_result) ... ok
+test_receipt_survives_restart (test_reliability.JournalTests.test_receipt_survives_restart) ... ok
+test_trace_survives_restart_and_preserves_attempt_duration (test_reliability.JournalTests.test_trace_survives_restart_and_preserves_attempt_duration) ... ok
+test_failed_publication_retries_latest_state (test_reliability.PublisherTests.test_failed_publication_retries_latest_state) ... ok
+test_queue_is_bounded (test_reliability.PublisherTests.test_queue_is_bounded) ... ok
+test_slow_cloud_does_not_block_ingestion_and_latest_state_wins (test_reliability.PublisherTests.test_slow_cloud_does_not_block_ingestion_and_latest_state_wins) ... ok
+test_two_entities_publish_concurrently_without_reordering_same_entity (test_reliability.PublisherTests.test_two_entities_publish_concurrently_without_reordering_same_entity) ... ok
+
+----------------------------------------------------------------------
+Ran 30 tests in 0.407s
+
+OK

@@ -1,0 +1,47 @@
+{
+  "ha_version": "2026.10.4",
+  "fixture": "official demo cover",
+  "action": "set_cover_position",
+  "position": 40,
+  "receipt": "service_accepted",
+  "ws_position": 40,
+  "result": "pass",
+  "scope": "isolated HA service and state-event protocol only; no hardware or cloud routing",
+  "addon_source_revision": "28b452e8eeed93c57e15721991543603fae7a02b",
+  "run_py_sha256": "8d9271444257c0e8a324e7c6950c5bd7847b502d532c2af9367219f41162f9d7",
+  "official_image_digest": "sha256:23f4dfbb69ce76315dbc4de7915504f1c2dcecd7ca2648113a493a385972e133",
+  "network_internal": true,
+  "host_network": false,
+  "port_binding": "127.0.0.1:18123:8123",
+  "home_credentials_present": false,
+  "prior_fixture_attempt": {
+    "requested": 37,
+    "confirmation": "timeout",
+    "cause": "Official demo rounds position to nearest ten; resulting position40, not37. No production defect inferred."
+  },
+  "durable_receipt_reopen_verified": true,
+  "retained_original_receipt_fingerprint": false,
+  "harness_limitation": "Original37 journal cannot be reconstructed. Fresh corrected-harness run independently verifies a unique new intent, retained receipt and reopen; no cross-attempt contract claim for original runs.",
+  "first_successful_attempt": {
+    "position": 60,
+    "ws_position": 60,
+    "durable_receipt_reopen_verified": false
+  },
+  "command_id": "isolated-cover-658e717b327e477b81450e3df4a5c171",
+  "receipt_reopened": true,
+  "retained_journal": {
+    "sha256": "b69cf1e018a76cf14460c8ca0bf2ab78163356523fba661a58b7664fede98b76",
+    "rows": 1,
+    "integrity": "ok",
+    "command_id": "isolated-cover-658e717b327e477b81450e3df4a5c171",
+    "fingerprint": "6470f1a2beb84c72e48d3f9d1a2b758d5957918e25bf9d33ec5a41af14f687dd",
+    "outcome": "service_accepted",
+    "acked": 0,
+    "trace": {
+      "addonReceivedAt": 1793250456.92475,
+      "addonDispatchedAt": 1793250456.92475,
+      "addonCompletedAt": 1793250456.9273298,
+      "addonAttemptDurationMs": 2.6202259978163056
+    }
+  }
+}

@@ -1,6 +1,6 @@
-# LapaHub Addon Dependencies
-# Note: aiohttp is installed via apk (py3-aiohttp)
-# Only additional packages needed here
-
-python-dateutil>=2.8.0
-psutil>=5.9.0
+# For non-Alpine development environments. The runtime image installs these
+# through apk so native dependencies use binaries matching its Alpine release.
+aiohttp>=3.9.0,<4
+python-dateutil>=2.8.0,<3
+psutil>=5.9.0,<8
+PyYAML>=6.0,<7
