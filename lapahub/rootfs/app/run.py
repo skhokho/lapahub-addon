@@ -1451,55 +1451,56 @@ class LapaHubAddon:
     async def fetch_energy_prefs(self):
         """Fetch Energy Dashboard preferences from Home Assistant via WebSocket API."""
         try:
-            # Use WebSocket API to get energy preferences
-            ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
-            logger.info(f"Fetching Energy Dashboard config via WebSocket")
+            async with asyncio.timeout(10):
+                # Use WebSocket API to get energy preferences
+                ws_url = f"{HA_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/api/websocket"
+                logger.info(f"Fetching Energy Dashboard config via WebSocket")
 
-            async with self.session.ws_connect(ws_url) as ws:
-                # Wait for auth_required message
-                msg = await ws.receive_json()
-                if msg.get("type") != "auth_required":
-                    logger.warning(f"Unexpected WS message: {msg}")
-                    return False
+                async with self.session.ws_connect(ws_url) as ws:
+                    # Wait for auth_required message
+                    msg = await ws.receive_json()
+                    if msg.get("type") != "auth_required":
+                        logger.warning(f"Unexpected WS message: {msg}")
+                        return False
 
-                # Send auth
-                await ws.send_json({
-                    "type": "auth",
-                    "access_token": SUPERVISOR_TOKEN,
-                })
+                    # Send auth
+                    await ws.send_json({
+                        "type": "auth",
+                        "access_token": SUPERVISOR_TOKEN,
+                    })
 
-                # Wait for auth response
-                msg = await ws.receive_json()
-                if msg.get("type") != "auth_ok":
-                    logger.warning(f"WS auth failed: {msg}")
-                    return False
+                    # Wait for auth response
+                    msg = await ws.receive_json()
+                    if msg.get("type") != "auth_ok":
+                        logger.warning(f"WS auth failed: {msg}")
+                        return False
 
-                # Request energy preferences
-                await ws.send_json({
-                    "id": 1,
-                    "type": "energy/get_prefs",
-                })
+                    # Request energy preferences
+                    await ws.send_json({
+                        "id": 1,
+                        "type": "energy/get_prefs",
+                    })
 
-                # Wait for response
-                msg = await ws.receive_json()
-                if msg.get("success"):
-                    self.energy_prefs = msg.get("result", {})
-                    self.energy_prefs_last_fetch = datetime.now(timezone.utc)
-                    sources = self.energy_prefs.get("energy_sources", [])
-                    logger.info(f"Loaded Energy Dashboard config with {len(sources)} sources")
-                    if sources:
-                        self.log_activity(f"Energy Dashboard: {len(sources)} sources configured")
-                        # Log the source types for debugging
-                        for source in sources[:5]:  # Log first 5
-                            source_type = source.get("type", "unknown")
-                            stat_id = source.get("stat_energy_from") or source.get("stat_energy_to") or "N/A"
-                            logger.info(f"  Energy source: {source_type} -> {stat_id}")
+                    # Wait for response
+                    msg = await ws.receive_json()
+                    if msg.get("success"):
+                        self.energy_prefs = msg.get("result", {})
+                        self.energy_prefs_last_fetch = datetime.now(timezone.utc)
+                        sources = self.energy_prefs.get("energy_sources", [])
+                        logger.info(f"Loaded Energy Dashboard config with {len(sources)} sources")
+                        if sources:
+                            self.log_activity(f"Energy Dashboard: {len(sources)} sources configured")
+                            # Log the source types for debugging
+                            for source in sources[:5]:  # Log first 5
+                                source_type = source.get("type", "unknown")
+                                stat_id = source.get("stat_energy_from") or source.get("stat_energy_to") or "N/A"
+                                logger.info(f"  Energy source: {source_type} -> {stat_id}")
+                        else:
+                            logger.warning("Energy Dashboard has no sources configured")
+                        return True
                     else:
-                        logger.warning("Energy Dashboard has no sources configured")
-                    return True
-                else:
-                    logger.warning(f"Energy prefs request failed: {msg}")
-                    return False
+                        logger.warning(f"Energy prefs request failed: {msg}")
+                        return False
 
         except Exception as e:
             logger.warning(f"Could not fetch energy preferences: {e}")
@@ -1859,6 +1860,8 @@ class LapaHubAddon:
             headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
             timeout=aiohttp.ClientTimeout(total=30),
         ) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"getPendingCommands returned {resp.status}")
             if resp.status == 200:
                 data = await resp.json()
                 commands = data.get("commands", [])
