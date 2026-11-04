@@ -51,8 +51,13 @@ before compatible backend gates and exact-source image/tests pass.
   use a fresh explicitly authorized intent and preserve all prior receipt evidence;
   do not operate pool/camera/other hardware. Missing-target behavior uses generated
   or safely non-mutating preflight proof, never an unauthorized physical POST.
-- On any retention/source/health failure, stop and roll back using the captured59
-  image plus the NEW verified populated backup. Re-attest both databases afterward.
+- On any retention/source/health failure, stop and capture the current database
+  files and row manifest before recovery. Prefer the captured59 image against the
+  unchanged compatible data mount. Never restore a pre-upgrade backup over newer
+  receipts or scene tombstones: that could erase replay protection. If restoring
+  data is necessary, preserve the latest durable history in a reviewed recovery
+  plan first, then re-attest both databases. The new verified populated backup is
+  a recovery artifact, not permission to discard post-backup writes.
 
 Finally restore the exact captured Advanced SSH options/protection and stopped
 state, preserve original addon startup/watchdog/autoupdate policy, and verify those
