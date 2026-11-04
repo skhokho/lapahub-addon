@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lapahub/rootfs/app
 def actual_type():
     source = Path(__file__).resolve().parents[1] / 'lapahub/rootfs/app/run.py'
     cls = next(n for n in ast.parse(source.read_text()).body if isinstance(n, ast.ClassDef) and n.name == 'LapaHubAddon')
-    names = {'sync_devices', 'handle_state_change'}
+    names = {'sync_devices', 'handle_state_change', 'camera_capture_loop'}
     ns = {'logger': logging.getLogger('camera-test')}
     try:
         from camera_capture import safe_camera_attributes, safe_camera_state
@@ -30,6 +30,7 @@ def actual_type():
 class CameraPrivacyTests(unittest.IsolatedAsyncioTestCase):
     def setup_addon(self):
         addon = actual_type()()
+        addon.camera_live_enabled = True
         addon.devices = {}
         addon.entity_device_map = {}
         addon.physical_devices = {}
@@ -86,3 +87,20 @@ class CameraPrivacyTests(unittest.IsolatedAsyncioTestCase):
         state = {'entity_id': 'climate.fixture', 'state': 'heat', 'attributes': {'temperature': 21}}
         await addon.handle_state_change({'entity_id': 'climate.fixture', 'new_state': state})
         self.assertEqual(addon.state_publisher.offer.call_args.args[0]['attributes'], {'temperature': 21})
+
+    async def test_disabled_or_absent_gate_never_contacts_camera_or_relay(self):
+        for missing in (False, True):
+            addon = self.setup_addon()
+            if missing:
+                del addon.camera_live_enabled
+            else:
+                addon.camera_live_enabled = False
+            # No session/HA token/relay globals exist in this actual-method harness.
+            # Any attempt to initialize capture therefore fails this regression.
+            await addon.camera_capture_loop()
+            addon.get_ha_states = AsyncMock(return_value=[self.state()])
+            await addon.sync_devices()
+            self.assertEqual(addon.push_devices_to_cloud.await_args.args[0], [])
+            await addon.handle_state_change({'entity_id': 'camera.fixture', 'new_state': self.state()})
+            addon.state_publisher.offer.assert_not_called()
+            self.assertEqual(addon.devices, {})

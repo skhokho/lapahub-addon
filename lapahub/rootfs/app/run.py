@@ -163,6 +163,7 @@ class LapaHubAddon:
         self.firebase_project = os.environ.get("FIREBASE_PROJECT_ID", "lapahub-dev-c8872")
 
         # Sensor realtime config (BETA: default off to reduce Firestore writes)
+        self.camera_live_enabled = self.options.get("camera_live_enabled", False) is True
         self.sensor_realtime = self.options.get("sensor_realtime", False)
         self.sensor_poll_interval = self.options.get("sensor_poll_interval_seconds", 30)
 
@@ -567,6 +568,9 @@ class LapaHubAddon:
         if domain not in relevant_domains:
             return
 
+        if domain == "camera" and not getattr(self, "camera_live_enabled", False):
+            return
+
         new_state_value = new_state.get("state")
         if domain == "camera":
             new_state_value = safe_camera_state(new_state_value)
@@ -613,9 +617,12 @@ class LapaHubAddon:
                 logger.warning("State publication overflow: dropped=%s queued=%s", self.state_publisher.dropped, len(self.state_publisher.pending))
 
     async def camera_capture_loop(self):
+        # Rollout gate: absent/false options must not contact relay or HA cameras.
+        if not getattr(self, "camera_live_enabled", False):
+            return
         worker = CameraCaptureWorker(
             self.session, HA_BASE_URL, SUPERVISOR_TOKEN or '',
-            f"https://us-central1-{self.firebase_project}.cloudfunctions.net/cameraRelay",
+            "https://us-central1-lapahub-dev-c8872.cloudfunctions.net/cameraRelay",
             self.hub_id, lambda: (self.firebase_credentials or {}).get('token', ''),
             running=lambda: self.running)
         await worker.run()
@@ -1738,6 +1745,9 @@ class LapaHubAddon:
             domain = entity_id.split(".")[0] if "." in entity_id else ""
 
             if domain not in relevant_domains:
+                continue
+
+            if domain == "camera" and not getattr(self, "camera_live_enabled", False):
                 continue
 
             attributes = state.get("attributes", {})
