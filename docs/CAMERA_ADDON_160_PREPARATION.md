@@ -1,4 +1,4 @@
-# Camera addon candidate on installed 1.0.60
+# Future camera addon 1.0.61 candidate based on installed 1.0.60
 
 This isolated candidate starts at `1eea828` (installed code `455f939` plus rollback documentation). It ports the historical camera API evidence and camera-only implementation without importing the uninstalled SSE transport candidate.
 
@@ -8,4 +8,6 @@ The relay URL is fixed. Hub and Supervisor credentials appear only in their resp
 
 Validation on this preparation: combined 120 Python tests passed, including missing/false gate no-contact checks, camera privacy/control/scene guards, simulated HTTP capture/expiry/revocation/JPEG bounds, existing 71 service mappings, preflight failures, multi-service dispatch evidence and both database reopen/retention tests. Python compile and whitespace checks passed. Image build/import/private-database smoke is a separate CI gate, not yet claimed by this document.
 
-`HA_CAMERA_API_2026-10-29.*` records historical generated isolated HA evidence; it was not rerun during this port. No HA/feed/home-image/physical calls, installation or production changes were made. This is continuous JPEG preparation, not HLS/audio or hardware compatibility signoff. Version remains 1.0.60 until a separately authorized release candidate is packaged.
+`HA_CAMERA_API_2026-10-29.*` records historical generated isolated HA evidence; it was not rerun during this port. No HA/feed/home-image/physical calls, installation or production changes were made. This is continuous JPEG preparation, not HLS/audio or hardware compatibility signoff. Future version 1.0.61 packages the reviewed camera code with the false default unchanged; the live addon remains 1.0.60. Backend deployment and privacy review must precede any addon rollout, followed by the app gate.
+
+The original code checkpoint `0107045` passed exact-source CI run `41811095317` (120 tests and Docker image smoke). Version 1.0.61 has a separate exact-source CI gate; the earlier run is not evidence for this new packaging commit. Backend incarnation fencing is server-internal and does not change the worker wire contract.

@@ -1,3 +1,10 @@
+# 1.0.61 — Disabled-by-default live camera JPEG preparation
+
+- Add bounded, lease-driven outbound JPEG capture; camera_live_enabled defaults to false and also gates camera discovery/realtime publication.
+- Publish only allowlisted camera metadata; reject camera controls and mixed camera scenes before snapshotting or dispatch.
+- Retain exact live-target preflight, original deadlines, first dispatch evidence, supported non-camera domains and both private database schemas.
+- Preparation only: enablement requires backend → addon → app rollout gates. No HLS/audio or physical-camera compatibility claim.
+
 # 1.0.60 — Verify live targets and report supported control domains
 
 - Check the exact HA entity through a bounded read before targeted service dispatch; never guess replacements for missing entities.
