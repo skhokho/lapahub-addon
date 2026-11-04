@@ -1,3 +1,12 @@
+# 1.0.60 — Verify live targets and report supported control domains
+
+- Check the exact HA entity through a bounded read before targeted service dispatch; never guess replacements for missing entities.
+- Reject missing, restored, unavailable or invalid targets without a service POST; keep legitimate unknown stateless targets usable.
+- Preserve original deadlines through preflight and POST, and retain honest first-dispatch evidence across multi-step failures.
+- Include eight already-supported non-camera domains in discovery and realtime state reporting.
+- Preserve the addon slug, options, both private database schemas and existing receipt/scene data.
+- Does not enable camera control, inventory-based absence invalidation or the separate SSE recovery candidate.
+
 # 1.0.59 — Qualify live power source reports
 
 - Require timezone-aware HA last_reported within ten minutes (at most one minute ahead) for live power values.
