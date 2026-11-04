@@ -557,6 +557,8 @@ class LapaHubAddon:
         relevant_domains = [
             "switch", "light", "climate", "cover", "fan",
             "sensor", "binary_sensor", "lock", "media_player",
+            "input_boolean", "siren", "remote", "button", "vacuum",
+            "water_heater", "humidifier", "valve",
             "scene", "automation",
         ]
 
@@ -572,6 +574,8 @@ class LapaHubAddon:
         realtime_domains = [
             "switch", "light", "climate", "cover", "fan",
             "lock", "media_player", "scene", "automation",
+            "input_boolean", "siren", "remote", "button", "vacuum",
+            "water_heater", "humidifier", "valve",
             "binary_sensor",  # Always realtime for security
         ]
 
@@ -1649,6 +1653,8 @@ class LapaHubAddon:
         relevant_domains = [
             "switch", "light", "climate", "cover", "fan",
             "sensor", "binary_sensor", "lock", "media_player",
+            "input_boolean", "siren", "remote", "button", "vacuum",
+            "water_heater", "humidifier", "valve",
         ]
 
         devices = []
