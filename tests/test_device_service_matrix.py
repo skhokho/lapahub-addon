@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 import tempfile
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 import unittest
 import aiohttp
 from aiohttp import web
@@ -245,14 +245,36 @@ class ServiceMatrixTests(unittest.IsolatedAsyncioTestCase):
   import time
   from reliability import active_command
   self.lookup_gate=asyncio.Event();self.lookup_block_entity='switch.first'
-  first=asyncio.create_task(self.addon.execute_command({'id':'context-first','entity_id':'switch.first','action':'turn_on','params':{},'expires_at':time.time()+.05}))
-  await self.lookup_entered.wait()
-  await self.addon.execute_command({'id':'context-second','entity_id':'switch.second','action':'turn_on','params':{},'expires_at':time.time()+5})
-  await asyncio.sleep(.08);self.lookup_gate.set();await first
+  # Advance only the wall clock under test, after the first real HTTP lookup
+  # arrives. A loaded runner must not consume a 50ms setup window and strand
+  # an unbounded event wait before any lookup can happen.
+  clock=[time.time()]
+  with patch('time.time',side_effect=lambda:clock[0]):
+   first=asyncio.create_task(self.addon.execute_command({'id':'context-first','entity_id':'switch.first','action':'turn_on','params':{},'expires_at':clock[0]+30}))
+   try:
+    await asyncio.wait_for(self.lookup_entered.wait(),2)
+    await asyncio.wait_for(self.addon.execute_command({'id':'context-second','entity_id':'switch.second','action':'turn_on','params':{},'expires_at':clock[0]+60}),2)
+    clock[0]+=31
+    self.lookup_gate.set()
+    await asyncio.wait_for(first,2)
+   finally:
+    self.lookup_gate.set()
+    if not first.done():first.cancel()
+    await asyncio.gather(first,return_exceptions=True)
   self.assertEqual(self.requests,[('switch','turn_on',{'entity_id':'switch.second'})])
   self.assertIn(('context-first','expired'),self.addon.command_journal.pending())
   self.assertIn(('context-second','service_accepted'),self.addon.command_journal.pending())
   self.assertIsNone(active_command.get())
+
+ async def test_concurrent_deadline_fixture_survives_delayed_scheduling(self):
+  original=self.addon.execute_command
+  async def delayed(command):
+   if command['id']=='context-first':await asyncio.sleep(.12)
+   return await original(command)
+  # This delay exceeds the former 50ms deadline: the old test waited forever
+  # for a lookup that the correctly expired command could never issue.
+  with patch.object(self.addon,'execute_command',side_effect=delayed):
+   await asyncio.wait_for(self.test_concurrent_intent_deadlines_do_not_leak_between_tasks(),5)
 
  async def test_preflight_failure_preserves_existing_receipt_and_scene_tombstone(self):
   import hashlib
