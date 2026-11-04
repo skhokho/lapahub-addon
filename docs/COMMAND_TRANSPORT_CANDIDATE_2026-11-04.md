@@ -67,3 +67,26 @@ integration and review of observed production claim/request timings. Confirm the
 one-second opening budget is suitable under actual managed network/cold-start
 conditions. Root owns any eventual rollout with both databases preserved. No
 merge into addon PR1 or app90 is authorized by this preparation record.
+
+## Subsequent read-only transport evidence and optional warmup review
+
+Root's exact-hub ten-minute Cloud Logging probe41772286511/job126384515944 at
+04:18:54UTC observed432 completed getPendingCommands requests, all HTTP200,
+zero completed waitForCommands requests, four unscoped records and no truncation.
+Request durations were74.6–469.7ms and observed classic-GET cadence about1.4seconds.
+This proves active classic-GET traffic during that window, not the component's
+complete transport state or a2.5-second causal queue wait. The actual claimedAt
+versus queuedAt interval and the remaining acknowledgement/UI stages still matter.
+The independent90 upload/Apple-processing milestone remains unaffected.
+
+An optional next design step is a nonclaiming, unauthenticated OPTIONS warmup
+before a bounded serial SSE GET, if exact deployed wrapper behavior is verified.
+The inspected source has no explicit waitForCommands OPTIONS branch/cors:true;
+its no-Authorization path rejects before authentication/claim. Do not assume a
+204 preflight or that a warmup reaches the same instance. Even a verified wrapper
+preflight may warm initialization without proving the subsequent GET's claim or
+Firestore path is warm. This is a proposal only; no OPTIONS request or source
+implementation was added. A cold GET can still claim after client cancellation;
+this candidate bounds the opening wait but cannot promise delivery of every
+claimed intent before its original deadline. Never reset identities/deadlines or
+replay expired physical commands to hide that transport loss.
