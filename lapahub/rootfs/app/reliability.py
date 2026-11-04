@@ -4,8 +4,14 @@ import hashlib
 import json
 import sqlite3
 import time
+from contextvars import ContextVar
 from collections import OrderedDict
 from pathlib import Path
+
+
+# Task-local command metadata prevents maintenance tasks or concurrent intents
+# from borrowing another command's deadline or dispatch receipt.
+active_command = ContextVar('lapahub_active_command', default=None)
 
 
 class CommandExpired(Exception):
@@ -60,6 +66,18 @@ class CommandJournal:
                             (command_id, digest, 'executing', observed, json.dumps(trace)))
         self._starts[command_id] = started
         return True
+
+    def preflight_started(self, command_id):
+        trace = self.trace(command_id)
+        trace.pop('addonDispatchedAt', None)
+        with self.db:
+            self.db.execute('UPDATE commands SET trace=? WHERE id=?', (json.dumps(trace), command_id))
+
+    def dispatched(self, command_id):
+        trace = self.trace(command_id)
+        trace['addonDispatchedAt'] = time.time()
+        with self.db:
+            self.db.execute('UPDATE commands SET trace=? WHERE id=?', (json.dumps(trace), command_id))
 
     def complete(self, command_id, outcome):
         if outcome not in ('service_accepted', 'failed', 'expired', 'unknown'):

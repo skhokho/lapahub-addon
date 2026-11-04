@@ -10,6 +10,7 @@ import dateutil
 import yaml
 from managed_scenes import ManagedScenes
 from reliability import CommandJournal
+from ha_target import require_live_target, TargetNotDispatched
 
 expected = str(yaml.safe_load(Path('/config.yaml').read_text())['version'])
 app = importlib.import_module('run')

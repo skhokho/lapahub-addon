@@ -45,7 +45,7 @@ CASES={
 def actual_type(base):
  source=Path(__file__).resolve().parents[1]/'lapahub/rootfs/app/run.py'
  cls=next(n for n in ast.parse(source.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='LapaHubAddon')
- names={'execute_command','_execute_command_once','call_ha_service','report_command_result','handle_state_change','sync_devices','push_state_change_to_cloud','push_devices_to_cloud'}
+ names={'execute_command','_execute_command_once','call_ha_service','report_command_result','handle_state_change','sync_devices','push_state_change_to_cloud','push_devices_to_cloud','trigger_scene'}
  ns=dict(asyncio=asyncio,datetime=datetime,timezone=timezone,aiohttp=aiohttp,logger=logging.getLogger('device-matrix'),
          CommandExpired=CommandExpired,check_command_deadline=check_command_deadline,HA_BASE_URL=base,SUPERVISOR_TOKEN='synthetic-ha')
  methods=[m for m in cls.body if isinstance(m,ast.AsyncFunctionDef) and m.name in names]
@@ -63,10 +63,31 @@ class ContractCoverageTests(unittest.TestCase):
 
 class ServiceMatrixTests(unittest.IsolatedAsyncioTestCase):
  async def asyncSetUp(self):
-  self.requests=[];self.acks=[];self.status=200;self.cloud_states=[];self.cloud_status=200;self.ack_status=200
+  self.requests=[];self.acks=[];self.lookup_calls=[];self.lookup_status=200;self.lookup_mode='valid';self.post_gate=None;self.post_entered=asyncio.Event();self.lookup_gate=None;self.lookup_block_entity=None;self.redirects=0;self.flow=[];self.lookup_entered=asyncio.Event();self.status=200;self.cloud_states=[];self.cloud_status=200;self.ack_status=200
+  async def lookup(request):
+   self.assertEqual(request.headers['Authorization'],'Bearer synthetic-ha')
+   entity=request.match_info['entity'];self.lookup_calls.append(entity);self.flow.append('get:'+entity);self.lookup_entered.set()
+   if self.lookup_gate and self.lookup_block_entity in (None,entity):await self.lookup_gate.wait()
+   if self.lookup_mode=='redirect':raise web.HTTPFound('/redirect-target')
+   if self.lookup_mode=='invalid_shape':return web.json_response([])
+   if self.lookup_mode=='wrong_mime':return web.Response(text='{}',content_type='text/html')
+   if self.lookup_mode=='chunked_oversize':
+    response=web.StreamResponse(headers={'Content-Type':'application/json'});await response.prepare(request)
+    try:await response.write(b'x'*65537)
+    except ConnectionResetError:pass
+    return response
+   if self.lookup_mode=='invalid_json':return web.Response(text='{invalid',content_type='application/json')
+   if self.lookup_mode=='too_large':return web.json_response({'entity_id':entity,'state':'on','attributes':{'data':'x'*65536}})
+   if self.lookup_mode=='wrong_entity':entity='switch.some_other_device'
+   state='unknown' if self.lookup_mode=='unknown' else 'unavailable' if self.lookup_mode=='unavailable' else 'on'
+   return web.json_response({'entity_id':entity,'state':state,'attributes':{'restored':self.lookup_mode=='restored'}},status=self.lookup_status)
+  async def redirected(request):
+   self.redirects+=1;return web.json_response({})
   async def service(request):
    self.assertEqual(request.headers['Authorization'],'Bearer synthetic-ha')
-   payload=await request.json();self.requests.append((request.match_info['domain'],request.match_info['service'],payload))
+   payload=await request.json();self.flow.append('post:'+payload.get('entity_id','new-scene'));self.requests.append((request.match_info['domain'],request.match_info['service'],payload))
+   self.post_entered.set()
+   if self.post_gate:await self.post_gate.wait()
    return web.json_response([],status=self.status)
   async def acknowledgement(request):
    self.assertEqual(request.headers['Authorization'],'Bearer synthetic-cloud')
@@ -74,10 +95,11 @@ class ServiceMatrixTests(unittest.IsolatedAsyncioTestCase):
   async def cloud_state(request):
    self.assertEqual(request.headers['Authorization'],'Bearer synthetic-cloud')
    self.cloud_states.append(await request.json());return web.json_response({},status=self.cloud_status)
-  app=web.Application();app.router.add_post('/cloud/updateDeviceState',cloud_state);app.router.add_post('/api/services/{domain}/{service}',service);app.router.add_post('/cloud/reportCommandResult',acknowledgement)
+  app=web.Application();app.router.add_get('/api/states/{entity}',lookup);app.router.add_get('/redirect-target',redirected);app.router.add_post('/cloud/updateDeviceState',cloud_state);app.router.add_post('/api/services/{domain}/{service}',service);app.router.add_post('/cloud/reportCommandResult',acknowledgement)
   self.runner=web.AppRunner(app);await self.runner.setup();site=web.TCPSite(self.runner,'127.0.0.1',0);await site.start()
   self.base='http://127.0.0.1:'+str(site._server.sockets[0].getsockname()[1]);self.session=aiohttp.ClientSession(trust_env=False)
   class Gateway:
+   def get(inner,url,**kwargs):return self.session.get(url,**kwargs)
    def post(inner,url,**kwargs):
     if url.startswith('https://us-central1-'):url=self.base+'/cloud/'+url.rsplit('/',1)[-1]
     return self.session.post(url,**kwargs)
@@ -88,6 +110,8 @@ class ServiceMatrixTests(unittest.IsolatedAsyncioTestCase):
   self.addon.entity_device_map={};self.addon.physical_devices={};self.addon.push_devices_to_cloud=AsyncMock()
 
  async def asyncTearDown(self):
+  if self.lookup_gate:self.lookup_gate.set()
+  if self.post_gate:self.post_gate.set()
   await self.session.close();await self.runner.cleanup();self.addon.command_journal.close();self.tmp.cleanup()
 
  async def test_every_admitted_non_camera_service_exact_http_and_ack(self):
@@ -95,10 +119,11 @@ class ServiceMatrixTests(unittest.IsolatedAsyncioTestCase):
   for domain,services in CASES.items():
    for action,params in services.items():
     with self.subTest(domain=domain,action=action):
-     index+=1;command_id='matrix-'+str(index);entity=domain+'.fixture'
+     index+=1;flow_before=len(self.flow);command_id='matrix-'+str(index);entity=domain+'.fixture'
      await self.addon.execute_command({'id':command_id,'entity_id':entity,'action':action,'params':params})
      expected_service={'open':'open_cover','close':'close_cover'}.get(action,action)
      self.assertEqual(self.requests[-1],(domain,expected_service,{**params,'entity_id':entity}))
+     self.assertEqual(self.flow[flow_before:],['get:'+entity,'post:'+entity])
      self.assertIn((command_id,'service_accepted'),self.addon.command_journal.pending())
      await self.addon.report_command_result(command_id,'service_accepted')
      self.assertEqual(self.acks[-1]['commandId'],command_id);self.assertTrue(self.acks[-1]['success'])
@@ -161,3 +186,135 @@ class ServiceMatrixTests(unittest.IsolatedAsyncioTestCase):
   with self.assertRaisesRegex(RuntimeError,'503'):
    await self.addon.report_command_result(command_id,'service_accepted')
   self.assertIn((command_id,'service_accepted'),self.addon.command_journal.pending())
+
+ async def test_preflight_known_missing_invalid_and_unavailable_never_posts(self):
+  for index,(status,mode) in enumerate(((404,'valid'),(200,'wrong_entity'),(200,'invalid_json'),
+        (200,'unavailable'),(200,'restored'),(200,'too_large'),(500,'valid'),(401,'valid'),
+        (200,'redirect'),(200,'wrong_mime'),(200,'invalid_shape'),(200,'chunked_oversize'))):
+   with self.subTest(status=status,mode=mode):
+    self.lookup_status,self.lookup_mode=status,mode;before=len(self.requests);command_id='preflight-deny-'+str(index)
+    await self.addon.execute_command({'id':command_id,'entity_id':'switch.fixture','action':'turn_on','params':{}})
+    self.assertEqual(len(self.requests),before)
+    self.assertIn((command_id,'failed'),self.addon.command_journal.pending())
+    self.assertNotIn('addonDispatchedAt',self.addon.command_journal.trace(command_id))
+    self.assertEqual(self.redirects,0)
+
+ async def test_stateless_unknown_existing_target_can_dispatch(self):
+  self.lookup_mode='unknown'
+  await self.addon.execute_command({'id':'unknown-button','entity_id':'button.fixture','action':'press','params':{}})
+  self.assertEqual(self.requests[-1],('button','press',{'entity_id':'button.fixture'}))
+
+ async def test_deadline_expires_during_preflight_without_post_or_fake_dispatch_trace(self):
+  import time
+  self.lookup_gate=asyncio.Event()
+  command={'id':'preflight-expired','entity_id':'switch.fixture','action':'turn_on','params':{},'expires_at':time.time()+.05}
+  task=asyncio.create_task(self.addon.execute_command(command))
+  await asyncio.sleep(.08);self.lookup_gate.set();await task
+  self.assertEqual(self.requests,[])
+  self.assertIn(('preflight-expired','expired'),self.addon.command_journal.pending())
+  self.assertNotIn('addonDispatchedAt',self.addon.command_journal.trace('preflight-expired'))
+
+ async def test_network_uncertain_preflight_is_not_dispatched_and_not_replayed(self):
+  self.lookup_gate=asyncio.Event()
+  command={'id':'preflight-timeout','entity_id':'switch.fixture','action':'turn_on','params':{}}
+  await self.addon.execute_command(command)
+  self.lookup_gate.set()
+  self.assertEqual(self.requests,[])
+  self.assertIn(('preflight-timeout','failed'),self.addon.command_journal.pending())
+  self.assertNotIn('addonDispatchedAt',self.addon.command_journal.trace('preflight-timeout'))
+  before=len(self.lookup_calls)
+  await self.addon.execute_command(command)
+  self.assertEqual(len(self.lookup_calls),before)
+  self.assertEqual(self.requests,[])
+
+ async def test_scene_unknown_and_existing_target_still_dispatches(self):
+  self.lookup_mode='unknown'
+  self.assertTrue(await self.addon.call_ha_service('scene','turn_on',{'entity_id':'scene.fixture'}))
+  self.assertEqual(self.requests,[('scene','turn_on',{'entity_id':'scene.fixture'})])
+
+ async def test_dispatch_timestamp_only_appears_after_live_preflight(self):
+  import time
+  self.lookup_gate=asyncio.Event()
+  task=asyncio.create_task(self.addon.execute_command({'id':'precise-dispatch','entity_id':'switch.fixture','action':'turn_on','params':{}}))
+  await self.lookup_entered.wait()
+  self.assertNotIn('addonDispatchedAt',self.addon.command_journal.trace('precise-dispatch'))
+  released=time.time();self.lookup_gate.set();await task
+  self.assertGreaterEqual(self.addon.command_journal.trace('precise-dispatch')['addonDispatchedAt'],released)
+
+ async def test_concurrent_intent_deadlines_do_not_leak_between_tasks(self):
+  import time
+  from reliability import active_command
+  self.lookup_gate=asyncio.Event();self.lookup_block_entity='switch.first'
+  first=asyncio.create_task(self.addon.execute_command({'id':'context-first','entity_id':'switch.first','action':'turn_on','params':{},'expires_at':time.time()+.05}))
+  await self.lookup_entered.wait()
+  await self.addon.execute_command({'id':'context-second','entity_id':'switch.second','action':'turn_on','params':{},'expires_at':time.time()+5})
+  await asyncio.sleep(.08);self.lookup_gate.set();await first
+  self.assertEqual(self.requests,[('switch','turn_on',{'entity_id':'switch.second'})])
+  self.assertIn(('context-first','expired'),self.addon.command_journal.pending())
+  self.assertIn(('context-second','service_accepted'),self.addon.command_journal.pending())
+  self.assertIsNone(active_command.get())
+
+ async def test_preflight_failure_preserves_existing_receipt_and_scene_tombstone(self):
+  import hashlib
+  import sqlite3
+  from managed_scenes import ManagedScenes
+  journal=self.addon.command_journal
+  journal.claim({'id':'historic','entity_id':'light.old','action':'turn_off','params':{}})
+  journal.complete('historic','service_accepted')
+  row=journal.db.execute('SELECT * FROM commands WHERE id=?',('historic',)).fetchone()
+  schema=journal.db.execute('PRAGMA table_info(commands)').fetchall()
+  scenes_path=Path(self.tmp.name)/'scenes.sqlite3'
+  scenes=ManagedScenes(scenes_path)
+  scenes.save('scene.lapahub_old',{'scene_id':'lapahub_old','entities':{'light.old':{'state':'off'}}})
+  scenes.suppress('scene.lapahub_old');scenes.close()
+  before=(scenes_path.stat().st_ino,hashlib.sha256(scenes_path.read_bytes()).hexdigest())
+  self.lookup_status=404
+  await self.addon.execute_command({'id':'missing-new','entity_id':'switch.missing','action':'turn_on','params':{}})
+  self.assertEqual(journal.db.execute('SELECT * FROM commands WHERE id=?',('historic',)).fetchone(),row)
+  self.assertEqual(journal.db.execute('PRAGMA table_info(commands)').fetchall(),schema)
+  self.assertEqual((scenes_path.stat().st_ino,hashlib.sha256(scenes_path.read_bytes()).hexdigest()),before)
+  with sqlite3.connect(scenes_path) as db:
+   self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0],'ok')
+   self.assertEqual(db.execute('SELECT active FROM scenes').fetchall(),[(0,)])
+  self.assertEqual(self.requests,[])
+
+ async def test_scene_restore_post_then_missing_activation_preserves_uncertain_dispatch(self):
+  from managed_scenes import ManagedScenes
+  self.addon.managed_scenes=ManagedScenes(Path(self.tmp.name)/'multi-scenes.sqlite3')
+  self.addon.scene_lock=asyncio.Lock()
+  definition={'scene_id':'lapahub_fixture','entities':{'light.fixture':{'state':'on'}}}
+  self.addon.managed_scenes.save('scene.lapahub_fixture',definition)
+  self.addon.get_ha_states=AsyncMock(return_value=[{'entity_id':'light.fixture','state':'off'}])
+  self.lookup_status=404
+  try:
+   await self.addon.execute_command({'id':'scene-multi','entity_id':'scene.lapahub_fixture','action':'scene.turn_on','params':{}})
+   self.assertEqual(self.requests,[('scene','create',definition)])
+   self.assertEqual(self.lookup_calls,['scene.lapahub_fixture'])
+   self.assertIn(('scene-multi','unknown'),self.addon.command_journal.pending())
+   self.assertIn('addonDispatchedAt',self.addon.command_journal.trace('scene-multi'))
+  finally:self.addon.managed_scenes.close()
+
+ async def test_multi_post_second_preflight_failure_never_erases_first_dispatch(self):
+  first_trace=[]
+  async def multi(command):
+   self.assertTrue(await self.addon.call_ha_service('switch','turn_on',{'entity_id':'switch.first'}))
+   first_trace.append(self.addon.command_journal.trace(command['id'])['addonDispatchedAt'])
+   self.lookup_status=404
+   await self.addon.call_ha_service('switch','turn_off',{'entity_id':'switch.second'})
+  self.addon._execute_command_once=multi
+  await self.addon.execute_command({'id':'multi-post','entity_id':'switch.first','action':'turn_on','params':{}})
+  self.assertEqual(self.requests,[('switch','turn_on',{'entity_id':'switch.first'})])
+  self.assertIn(('multi-post','unknown'),self.addon.command_journal.pending())
+  self.assertEqual(self.addon.command_journal.trace('multi-post')['addonDispatchedAt'],first_trace[0])
+
+ async def test_post_wait_respects_original_remaining_budget_and_retains_uncertainty(self):
+  import time
+  self.post_gate=asyncio.Event()
+  started=time.monotonic()
+  await asyncio.wait_for(self.addon.execute_command({'id':'post-deadline','entity_id':'switch.fixture','action':'turn_on','params':{},'expires_at':time.time()+.15}),.6)
+  self.assertLess(time.monotonic()-started,.5)
+  self.assertTrue(self.post_entered.is_set())
+  self.assertEqual(len(self.requests),1)
+  self.assertIn(('post-deadline','unknown'),self.addon.command_journal.pending())
+  self.assertIn('addonDispatchedAt',self.addon.command_journal.trace('post-deadline'))
+  self.post_gate.set()
