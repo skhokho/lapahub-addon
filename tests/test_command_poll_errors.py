@@ -56,7 +56,7 @@ class PollErrorTests(unittest.IsolatedAsyncioTestCase):
         addon.execute_command.assert_not_awaited()
 
     async def test_real_listener_reauthenticates_after_sse_then_rejected_poll(self):
-        api = SimpleNamespace(CancelledError=asyncio.CancelledError, sleep=AsyncMock())
+        api = SimpleNamespace(CancelledError=asyncio.CancelledError, sleep=AsyncMock(), get_running_loop=asyncio.get_running_loop)
         addon = actual_type(api)()
         addon.firebase_credentials = {'token': 'synthetic-invalid-session'}
         addon.firebase_project = 'synthetic-fixture'

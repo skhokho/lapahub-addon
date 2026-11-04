@@ -1726,47 +1726,102 @@ class LapaHubAddon:
         except Exception as e:
             logger.warning(f"Could not push to cloud: {e}")
 
+    def command_transport_status(self):
+        """Safe in-memory transport evidence, never credentials or queue contents."""
+        state = dict(getattr(self, "command_transport", {"mode": "starting", "http_connected": False}))
+        retry_at = getattr(self, "command_sse_retry_at", None)
+        state["sse_retry_in_seconds"] = (max(0, round(retry_at - asyncio.get_running_loop().time(), 1))
+                                         if retry_at is not None else None)
+        return state
+
     async def command_listener_loop(self):
-        """Listen for commands via SSE streaming (Cloud Functions v2).
-
-        Opens a persistent HTTP connection to the waitForCommands endpoint.
-        The server pushes command events in real-time via Server-Sent Events.
-        Commands arrive in <500ms — no polling, no wasted cycles.
-
-        Falls back to classic 1s poll if SSE endpoint unavailable.
-        """
-        logger.info("Starting command listener (SSE streaming mode)")
-        consecutive_errors = 0
-        use_sse = True
-
-        while self.running:
-            try:
-                if use_sse:
-                    await self._stream_commands_sse()
-                else:
-                    await self._poll_commands_classic()
+        """Serial SSE recovery: polling remains authoritative until a bounded handoff."""
+        clock = asyncio.get_running_loop().time
+        self.command_transport = {"mode": "connecting", "http_connected": False,
+            "sse_connections": 0, "sse_failures": 0, "sse_retries": 0,
+            "poll_successes": 0, "poll_failures": 0, "reauth_attempts": 0,
+            "credential_generation_changes": 0, "last_error_kind": None, "last_error_at": None,
+            "last_http_status": None, "last_contact_at": None, "fallback_since": None}
+        state = self.command_transport
+        self.command_sse_retry_at = None
+        consecutive_errors, retry_delay, use_sse = 0, 30, True
+        token_generation = (self.firebase_credentials or {}).get("token")
+        try:
+            while self.running:
+                current_token = (self.firebase_credentials or {}).get("token")
+                if current_token != token_generation:
+                    token_generation = current_token
+                    state["credential_generation_changes"] += 1
+                    retry_delay = 30
+                    if not use_sse:
+                        self.command_sse_retry_at = clock()
+                if not current_token:
+                    state["mode"], state["http_connected"] = "waiting_auth", False
                     await asyncio.sleep(1)
-                # SSE returns normally when stream ends — reconnect immediately
-                consecutive_errors = 0
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                consecutive_errors += 1
-                if consecutive_errors <= 3:
-                    logger.error(f"Error in command listener: {e}")
-
-                if consecutive_errors >= 3 and use_sse:
-                    logger.warning("SSE failing, falling back to classic 1s poll")
-                    use_sse = False
+                    continue
+                probe = False
+                if not use_sse and self.command_sse_retry_at is not None and clock() >= self.command_sse_retry_at:
+                    # This point is reached only after the previous poll completed.
+                    # Never cancel a claimed poll or run two command consumers.
+                    use_sse, probe = True, True
+                    state["sse_retries"] += 1
+                    self.command_sse_retry_at = None
+                try:
+                    if use_sse:
+                        state["mode"] = "connecting"
+                        started = clock()
+                        await self._stream_commands_sse()
+                        if self.running and clock() - started < 30:
+                            raise RuntimeError("SSE closed before healthy interval")
+                        retry_delay = 30
+                    else:
+                        state["mode"] = "poll"
+                        await self._poll_commands_classic()
+                        state["poll_successes"] += 1
+                        await asyncio.sleep(1)
                     consecutive_errors = 0
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    consecutive_errors += 1
+                    state["last_error_kind"] = type(error).__name__
+                    state["last_error_at"] = datetime.now(timezone.utc).isoformat()
+                    state["sse_failures" if use_sse else "poll_failures"] += 1
+                    logger.warning("Command transport failed (%s)", type(error).__name__)
+                    if use_sse and (probe or consecutive_errors >= 3):
+                        use_sse = False
+                        state["mode"] = "poll"
+                        if state["fallback_since"] is None:
+                            state["fallback_since"] = datetime.now(timezone.utc).isoformat()
+                        self.command_sse_retry_at = clock() + retry_delay
+                        retry_delay = min(retry_delay * 2, 300)
+                        consecutive_errors = 0
+                        self.log_activity("Command transport using polling; bounded SSE retry scheduled", "warning")
+                    if consecutive_errors >= 5:
+                        state["reauth_attempts"] += 1
+                        await self.authenticate_with_retry()
+                        use_sse, consecutive_errors, retry_delay = True, 0, 30
+                        self.command_sse_retry_at = None
+                    await asyncio.sleep(1)
+        finally:
+            state["mode"], state["http_connected"] = "stopped", False
+            self.command_sse_retry_at = None
 
-                if consecutive_errors >= 5:
-                    self.log_activity("Too many command errors, re-authenticating", "warning")
-                    await self.authenticate_with_retry()
-                    use_sse = True
-                    consecutive_errors = 0
-
-                await asyncio.sleep(1)
+    async def _open_command_stream(self):
+        """Bound connection plus response headers; normal SSE reads retain 45s budget."""
+        api_url = f"https://us-central1-{self.firebase_project}.cloudfunctions.net/waitForCommands"
+        response = await asyncio.wait_for(self.session.get(
+            api_url, params={"hubId": self.hub_id, "commandProtocol": "2"},
+            headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}",
+                     "Accept": "text/event-stream"},
+            timeout=aiohttp.ClientTimeout(total=130, sock_read=45)), timeout=1)
+        state = getattr(self, "command_transport", None)
+        if state is not None:
+            state["last_http_status"] = response.status
+        if response.status != 200:
+            response.close()
+            raise RuntimeError(f"waitForCommands returned {response.status}")
+        return response
 
     async def _stream_commands_sse(self):
         """Open persistent SSE connection to receive commands in real-time."""
@@ -1774,52 +1829,49 @@ class LapaHubAddon:
             await asyncio.sleep(5)
             return
 
-        api_url = f"https://us-central1-{self.firebase_project}.cloudfunctions.net/waitForCommands"
+        response = await self._open_command_stream()
+        try:
+            async with response as resp:
+                state = getattr(self, "command_transport", None)
+                if state is not None:
+                    state["mode"], state["http_connected"] = "sse", True
+                    state["fallback_since"] = None
+                    state["sse_connections"] = state.get("sse_connections", 0) + 1
+                logger.info("SSE command stream connected")
+                self.log_activity("Command stream connected (SSE)")
 
-        async with self.session.get(
-            api_url,
-            params={"hubId": self.hub_id, "commandProtocol": "2"},
-            headers={
-                "Authorization": f"Bearer {self.firebase_credentials.get('token', '')}",
-                "Accept": "text/event-stream",
-            },
-            timeout=aiohttp.ClientTimeout(
-                total=130,     # Server timeout is 120s, add margin
-                sock_read=45,  # Heartbeat every 15s, so 45s without data = dead
-            ),
-        ) as resp:
-            if resp.status == 401:
-                raise Exception("Unauthorized — token may have expired")
-            if resp.status != 200:
-                raise Exception(f"waitForCommands returned {resp.status}")
+                # Parse SSE events line-by-line from the response stream
+                event_type = None
+                data_lines = []
 
-            logger.info("SSE command stream connected")
-            self.log_activity("Command stream connected (SSE)")
+                while self.running:
+                    line_bytes = await resp.content.readline()
+                    if not line_bytes:
+                        break  # Stream closed
 
-            # Parse SSE events line-by-line from the response stream
-            event_type = None
-            data_lines = []
+                    if state is not None:
+                        state["last_contact_at"] = datetime.now(timezone.utc).isoformat()
+                    line = line_bytes.decode("utf-8").rstrip("\n").rstrip("\r")
 
-            while self.running:
-                line_bytes = await resp.content.readline()
-                if not line_bytes:
-                    break  # Stream closed
+                    if line.startswith("event: "):
+                        event_type = line[7:]
+                    elif line.startswith("data: "):
+                        data_lines.append(line[6:])
+                    elif line == "":
+                        # Empty line = end of SSE event
+                        if event_type and data_lines:
+                            data_str = "\n".join(data_lines)
+                            await self._handle_sse_event(event_type, data_str)
+                        event_type = None
+                        data_lines = []
 
-                line = line_bytes.decode("utf-8").rstrip("\n").rstrip("\r")
+                logger.info("SSE stream ended, will reconnect")
 
-                if line.startswith("event: "):
-                    event_type = line[7:]
-                elif line.startswith("data: "):
-                    data_lines.append(line[6:])
-                elif line == "":
-                    # Empty line = end of SSE event
-                    if event_type and data_lines:
-                        data_str = "\n".join(data_lines)
-                        await self._handle_sse_event(event_type, data_str)
-                    event_type = None
-                    data_lines = []
-
-            logger.info("SSE stream ended, will reconnect")
+        finally:
+            response.close()
+            state = getattr(self, "command_transport", None)
+            if state is not None:
+                state["http_connected"] = False
 
     async def _handle_sse_event(self, event_type: str, data_str: str):
         """Process a single SSE event from the command stream."""
@@ -1860,10 +1912,15 @@ class LapaHubAddon:
             headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
             timeout=aiohttp.ClientTimeout(total=30),
         ) as resp:
+            state = getattr(self, "command_transport", None)
+            if state is not None:
+                state["last_http_status"] = resp.status
             if resp.status != 200:
                 raise RuntimeError(f"getPendingCommands returned {resp.status}")
             if resp.status == 200:
                 data = await resp.json()
+                if state is not None:
+                    state["last_contact_at"] = datetime.now(timezone.utc).isoformat()
                 commands = data.get("commands", [])
                 received_at = datetime.now(timezone.utc).timestamp()
                 for cmd in commands:
@@ -2451,6 +2508,7 @@ class LapaHubAddon:
             "websocket_connected": self.ha_websocket is not None and not self.ha_websocket.closed,
             "token_expires_at": token_expires,
             "retry_count": self.current_retry_count,
+            "command_transport": self.command_transport_status(),
             "state_publication": {"queued": len(self.state_publisher.pending),
                                   "active": len(self.state_publisher.active),
                                   "coalesced": self.state_publisher.coalesced,
