@@ -1430,17 +1430,38 @@ class LapaHubAddon:
 
     async def call_ha_service(self, domain: str, service: str, data: dict) -> bool:
         """Call a Home Assistant service."""
+        from reliability import active_command
+        from ha_target import require_live_target, TargetNotDispatched
+        context = active_command.get()
+        import time
+        expires_at = context["expires_at"] if context else None
+        target = data.get("entity_id")
+        if context and not context["preflight_started"]:
+            context["journal"].preflight_started(context["id"])
+            context["preflight_started"] = True
+        if target is not None:
+            await require_live_target(self.session, HA_BASE_URL, SUPERVISOR_TOKEN, target, domain, expires_at)
+        elif (domain, service) != ("scene", "create"):
+            raise TargetNotDispatched("missing_target")
+        check_command_deadline(expires_at)
+        if context and not context["dispatched"]:
+            context["journal"].dispatched(context["id"])
         headers = {
             "Authorization": f"Bearer {SUPERVISOR_TOKEN}",
             "Content-Type": "application/json",
         }
 
         try:
+            check_command_deadline(expires_at)
+            post_budget = 30 if expires_at is None else min(30, float(expires_at) - time.time())
+            check_command_deadline(expires_at)
+            if context:
+                context["dispatched"] = True
             async with self.session.post(
                 f"{HA_BASE_URL}/api/services/{domain}/{service}",
                 headers=headers,
                 json=data,
-                timeout=aiohttp.ClientTimeout(total=30),
+                timeout=aiohttp.ClientTimeout(total=post_budget),
             ) as resp:
                 if resp.status in (200, 201):
                     logger.info(f"Service called: {domain}.{service}")
@@ -1448,6 +1469,8 @@ class LapaHubAddon:
                 else:
                     logger.error(f"Service call failed: {resp.status}")
                     return False
+        except CommandExpired:
+            raise
         except Exception as e:
             logger.error(f"Error calling service: {e}")
             return False
@@ -1876,6 +1899,9 @@ class LapaHubAddon:
                     await self.execute_command(cmd)
 
     async def execute_command(self, command: dict):
+        from reliability import active_command
+        from ha_target import TargetNotDispatched
+        context_token = None
         cmd_id = command.get("id")
         claimed = False
         try:
@@ -1883,11 +1909,25 @@ class LapaHubAddon:
                 logger.info("Duplicate command %s suppressed", cmd_id)
                 return
             claimed = True
+            context_token = active_command.set({"journal": self.command_journal, "id": cmd_id,
+                "expires_at": command.get("expires_at"), "preflight_started": False, "dispatched": False})
             check_command_deadline(command.get("expires_at"))
             await self._execute_command_once(command)
-        except CommandExpired:
+        except TargetNotDispatched as error:
+            context = active_command.get()
+            already_dispatched = bool(context and context["dispatched"])
             if claimed:
-                self.command_journal.complete(cmd_id, "expired")
+                if not already_dispatched:
+                    self.command_journal.preflight_started(cmd_id)
+                self.command_journal.complete(cmd_id, "unknown" if already_dispatched else "failed")
+            logger.warning("Command %s target preflight rejected (%s); prior dispatch=%s", cmd_id, str(error), already_dispatched)
+        except CommandExpired:
+            context = active_command.get()
+            already_dispatched = bool(context and context["dispatched"])
+            if claimed:
+                if not already_dispatched:
+                    self.command_journal.preflight_started(cmd_id)
+                self.command_journal.complete(cmd_id, "unknown" if already_dispatched else "expired")
             logger.warning("Expired command %s rejected", cmd_id)
         except asyncio.CancelledError:
             # Keep the pre-dispatch receipt durable; restart resolves it as unknown.
@@ -1897,6 +1937,10 @@ class LapaHubAddon:
             # Do not blindly retry a command whose physical effect is uncertain.
             if claimed:
                 self.command_journal.complete(cmd_id, "unknown")
+
+        finally:
+            if context_token is not None:
+                active_command.reset(context_token)
 
     async def _execute_command_once(self, command: dict):
         """Execute a command from the cloud.
