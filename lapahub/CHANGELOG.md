@@ -1,3 +1,10 @@
+# Unreleased — Verified Home Assistant wrapper relationships (requires backend gate)
+
+- Publish only exact, non-inverted switch_as_x wrapper/source registry relationships; never infer links from labels, states or shared hardware.
+- Reject ambiguous, disabled, malformed or chained relationships. Read fresh registry evidence with bounded timeouts, captured cloud sessions and monotonic sequences.
+- Explicitly invalidate grouping evidence when registry or state reads fail; preserve independent device controls, observations, deadlines and confirmation receipts.
+- Requires the companion backend presentation protocol before installation and a compatible app for grouped cards. Preserve the existing slug, options and both private SQLite databases; no migration or camera enablement.
+
 # 1.0.61 — Disabled-by-default live camera JPEG preparation
 
 - Add bounded, lease-driven outbound JPEG capture; camera_live_enabled defaults to false and also gates camera discovery/realtime publication.

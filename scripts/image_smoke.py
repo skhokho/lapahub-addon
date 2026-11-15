@@ -12,10 +12,21 @@ from managed_scenes import ManagedScenes
 from reliability import CommandJournal
 from ha_target import require_live_target, TargetNotDispatched
 from camera_capture import safe_camera_attributes, validate_jpeg
+from registry_presentation import normalize_registry
 
 expected = str(yaml.safe_load(Path('/config.yaml').read_text())['version'])
 app = importlib.import_module('run')
 assert app.ADDON_VERSION == expected, 'Bundled version fallback does not match config'
+
+# The installed image must contain the new allowlisted registry normalizer.
+relation = normalize_registry([
+    {'entity_id': 'fan.fixture', 'id': 'wrapper-fixture', 'platform': 'switch_as_x',
+     'options': {'switch_as_x': {'entity_id': 'switch.fixture', 'invert': False}}},
+    {'entity_id': 'switch.fixture', 'id': 'source-fixture', 'platform': 'esphome'},
+])
+assert relation['complete'] is True and len(relation['entries']) == 2
+assert relation['entries'][0]['wrapper']['sourceRegistryId'] == 'source-fixture'
+assert normalize_registry(None) == {'complete': False, 'entries': []}
 
 # Exercise the installed adapter, including the direct dashboard override path.
 now = datetime.now(timezone.utc)

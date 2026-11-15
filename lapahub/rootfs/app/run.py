@@ -26,6 +26,7 @@ from reliability import CommandExpired, CommandJournal, StatePublisher, check_co
 from managed_scenes import ManagedScenes
 from energy_payload import EnergyDeliveryError, collect_energy_payload
 from camera_capture import CameraCaptureWorker, safe_camera_attributes, safe_camera_state
+from registry_presentation import collect_registry_presentation, unavailable_registry
 
 # Configure logging
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").upper()
@@ -1728,6 +1729,9 @@ class LapaHubAddon:
         states = await self.get_ha_states()
 
         if not states:
+            # A state-read outage must ungroup stale presentation evidence. This
+            # dedicated negative-only mode cannot change discovery/state/counts.
+            await self.push_devices_to_cloud([], presentation_only=True)
             return
 
         # Filter to relevant domains
@@ -1791,7 +1795,7 @@ class LapaHubAddon:
         # Send to cloud
         await self.push_devices_to_cloud(devices)
 
-    async def push_devices_to_cloud(self, devices: list):
+    async def push_devices_to_cloud(self, devices: list, *, presentation_only: bool = False):
         """Push device list to LapaHub cloud."""
         if not self.firebase_credentials:
             logger.debug("Skipping cloud push (no credentials)")
@@ -1799,15 +1803,30 @@ class LapaHubAddon:
 
         api_url = f"https://us-central1-{self.firebase_project}.cloudfunctions.net/syncDevices"
 
+        # A snapshot belongs to the cloud session captured before the HA read.
+        # Refreshing credentials during that read must not relabel old evidence
+        # as a new session. Backend rejects requests from a revoked session.
+        token = self.firebase_credentials.get("token", "")
+        if token != getattr(self, "_presentation_session_token", None):
+            self._presentation_session_token = token
+            self._presentation_sequence = 0
+        self._presentation_sequence += 1
+        sequence = self._presentation_sequence
+        presentation = unavailable_registry() if presentation_only else await collect_registry_presentation(
+            self.session, HA_BASE_URL, SUPERVISOR_TOKEN)
+        presentation["sequence"] = sequence
+
         try:
             async with self.session.post(
                 api_url,
                 json={
                     "hubId": self.hub_id,
                     "devices": devices,
+                    "presentationRegistryV1": presentation,
+                    **({"presentationOnly": True} if presentation_only else {}),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 },
-                headers={"Authorization": f"Bearer {self.firebase_credentials.get('token', '')}"},
+                headers={"Authorization": f"Bearer {token}"},
                 timeout=aiohttp.ClientTimeout(total=60),
             ) as resp:
                 if resp.status == 200:
