@@ -1,0 +1,109 @@
+{
+  "light": [
+    "turn_on",
+    "turn_off",
+    "toggle"
+  ],
+  "switch": [
+    "turn_on",
+    "turn_off",
+    "toggle"
+  ],
+  "input_boolean": [
+    "turn_on",
+    "turn_off",
+    "toggle"
+  ],
+  "siren": [
+    "turn_on",
+    "turn_off"
+  ],
+  "climate": [
+    "turn_on",
+    "turn_off",
+    "set_temperature",
+    "set_hvac_mode",
+    "set_fan_mode",
+    "set_preset_mode",
+    "set_swing_mode"
+  ],
+  "cover": [
+    "open",
+    "close",
+    "open_cover",
+    "close_cover",
+    "stop_cover",
+    "set_cover_position",
+    "open_cover_tilt",
+    "close_cover_tilt",
+    "stop_cover_tilt",
+    "set_cover_tilt_position"
+  ],
+  "fan": [
+    "turn_on",
+    "turn_off",
+    "toggle",
+    "set_percentage",
+    "set_preset_mode",
+    "oscillate",
+    "set_direction"
+  ],
+  "lock": [
+    "lock",
+    "unlock"
+  ],
+  "media_player": [
+    "turn_on",
+    "turn_off",
+    "media_play_pause",
+    "media_play",
+    "media_pause",
+    "media_stop",
+    "media_next_track",
+    "media_previous_track",
+    "volume_set",
+    "volume_mute",
+    "select_source",
+    "play_media"
+  ],
+  "camera": [
+    "turn_on",
+    "turn_off",
+    "enable_motion_detection",
+    "disable_motion_detection"
+  ],
+  "remote": [
+    "turn_on",
+    "turn_off",
+    "send_command"
+  ],
+  "button": [
+    "press"
+  ],
+  "vacuum": [
+    "start",
+    "pause",
+    "stop",
+    "return_to_base",
+    "locate",
+    "set_fan_speed"
+  ],
+  "water_heater": [
+    "turn_on",
+    "turn_off",
+    "set_temperature",
+    "set_operation_mode"
+  ],
+  "humidifier": [
+    "turn_on",
+    "turn_off",
+    "set_humidity",
+    "set_mode"
+  ],
+  "valve": [
+    "open_valve",
+    "close_valve",
+    "stop_valve",
+    "set_valve_position"
+  ]
+}

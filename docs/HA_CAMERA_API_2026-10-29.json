@@ -1,0 +1,111 @@
+{
+  "ha_version": "2026.10.4",
+  "fixture": "official demo camera with generated local checker patterns",
+  "snapshot": {
+    "content_type": "image/jpg",
+    "bytes": 1102,
+    "sha256": "39fe70c18647a1bde4b2efcdfa1fe043a27bad36dc75ae2ebb913f4210795915",
+    "width": 160,
+    "height": 96
+  },
+  "mjpeg_content_type": "multipart/x-mixed-replace; boundary=--frameboundary",
+  "mjpeg_frames": [
+    {
+      "content_type": "image/jpg",
+      "bytes": 1054,
+      "sha256": "a1730d1153b6aac475cfeea77f8b0ea5167c426a9f52a896a55e8027f7d5c952",
+      "width": 160,
+      "height": 96
+    },
+    {
+      "content_type": "image/jpg",
+      "bytes": 1054,
+      "sha256": "a1730d1153b6aac475cfeea77f8b0ea5167c426a9f52a896a55e8027f7d5c952",
+      "width": 160,
+      "height": 96
+    },
+    {
+      "content_type": "image/jpg",
+      "bytes": 1014,
+      "sha256": "821072e78260805b988c848d91d2e2723809126afd974ff52fec5cc5bd7a441d",
+      "width": 160,
+      "height": 96
+    }
+  ],
+  "advancing_frame_hashes": true,
+  "mjpeg_wire_delimiter": "--frameboundary",
+  "initial_standard_multipart_parser": "timeout: HA boundary declaration includes delimiter dashes",
+  "unauthenticated_status": {
+    "/api/camera_proxy/": 403,
+    "/api/camera_proxy_stream/": 403,
+    "invalid_bearer": 401
+  },
+  "camera_off_status": 503,
+  "camera_on_restored": {
+    "content_type": "image/jpg",
+    "bytes": 1026,
+    "sha256": "f5ac55d29c1d9cf5599b9c23898267afbed70b37316a42856171d279d0c5e697",
+    "width": 160,
+    "height": 96
+  },
+  "capabilities": {
+    "frontend_stream_types": [
+      "hls"
+    ]
+  },
+  "hls": {
+    "success": false,
+    "error_code": "start_stream_failed"
+  },
+  "frame_byte_limit": 524288,
+  "scope": "isolated authenticated HA camera bytes only; no app/cloud/hardware proof",
+  "image_digest": "sha256:23f4dfbb69ce76315dbc4de7915504f1c2dcecd7ca2648113a493a385972e133",
+  "network_internal": true,
+  "host_network": false,
+  "home_credentials_present": false,
+  "port_binding": "127.0.0.1:18123:8123",
+  "generated_patterns": [
+    {
+      "file": "demo_0.jpg",
+      "sha256": "39fe70c18647a1bde4b2efcdfa1fe043a27bad36dc75ae2ebb913f4210795915",
+      "bytes": 1102
+    },
+    {
+      "file": "demo_0.png",
+      "sha256": "9f4552dd78341468cea7f0e9b6a7c47c9136a3b2fa0e6debb4fa5646bc9a2282",
+      "bytes": 358
+    },
+    {
+      "file": "demo_1.jpg",
+      "sha256": "a1730d1153b6aac475cfeea77f8b0ea5167c426a9f52a896a55e8027f7d5c952",
+      "bytes": 1054
+    },
+    {
+      "file": "demo_1.png",
+      "sha256": "7c5141e168dd85286d4215123c9b3fd3fd1f58e3b6c37ae9f67d4945f8d662af",
+      "bytes": 384
+    },
+    {
+      "file": "demo_2.jpg",
+      "sha256": "821072e78260805b988c848d91d2e2723809126afd974ff52fec5cc5bd7a441d",
+      "bytes": 1014
+    },
+    {
+      "file": "demo_2.png",
+      "sha256": "e61d156517f649f3eaeb2d27f7f9474924018c45ea041bf7270ce8fc61a84c48",
+      "bytes": 403
+    },
+    {
+      "file": "demo_3.jpg",
+      "sha256": "f5ac55d29c1d9cf5599b9c23898267afbed70b37316a42856171d279d0c5e697",
+      "bytes": 1026
+    },
+    {
+      "file": "demo_3.png",
+      "sha256": "68fa1a6b7b3ae6fc9e8335000686f41da79124eb481045d2fbfeca55424be747",
+      "bytes": 391
+    }
+  ],
+  "offline_transport_not_tested": true,
+  "production_camera_implementation": false
+}

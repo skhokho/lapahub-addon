@@ -1,0 +1,93 @@
+{
+  "ha_version": "2026.10.4",
+  "fixture": "official local demo",
+  "cases": [
+    {
+      "id": "isolated-climate-89c12ceeb80e42dba89521a0474c616e",
+      "domain": "climate",
+      "entity_id": "climate.heatpump",
+      "action": "set_temperature",
+      "params": {
+        "temperature": 21.0
+      },
+      "before": 20.0,
+      "expected": 21.0,
+      "fingerprint": "23a1e88f95a71b313b18508840e675ee09a9bd2c32aaeb92dcb3f33dcd45ed45",
+      "receipt": "service_accepted",
+      "trace": {
+        "addonReceivedAt": 1793250843.4100792,
+        "addonDispatchedAt": 1793250843.4100792,
+        "addonCompletedAt": 1793250843.4125638,
+        "addonAttemptDurationMs": 2.528885001083836
+      },
+      "ws_event_time": "2026-10-29T05:14:03.411897+00:00",
+      "ws_observed": 21.0,
+      "result": "pass",
+      "receipt_reopened": true
+    },
+    {
+      "id": "isolated-lock-a8dd8334a29444d7a2008ca1cf76b593",
+      "domain": "lock",
+      "entity_id": "lock.front_door",
+      "action": "unlock",
+      "params": {},
+      "before": "locked",
+      "expected": "unlocked",
+      "fingerprint": "1c5258188ec4e9c541141a73bf665ec36062ddc12d68d332636c914156839e3f",
+      "receipt": "service_accepted",
+      "trace": {
+        "addonReceivedAt": 1793250843.4228687,
+        "addonDispatchedAt": 1793250843.4228687,
+        "addonCompletedAt": 1793250845.426311,
+        "addonAttemptDurationMs": 2003.4769909980241
+      },
+      "ws_event_time": "2026-10-29T05:14:05.425510+00:00",
+      "ws_observed": "unlocked",
+      "result": "pass",
+      "receipt_reopened": true
+    },
+    {
+      "id": "isolated-media_player-82eca82072c840e4b952228de471e65b",
+      "domain": "media_player",
+      "entity_id": "media_player.living_room",
+      "action": "volume_set",
+      "params": {
+        "volume_level": 0.37
+      },
+      "before": 1.0,
+      "expected": 0.37,
+      "fingerprint": "aba8a097268f0c6d2f55a4ebde543f59c2a58486bc1b123565159697cdb2fae2",
+      "receipt": "service_accepted",
+      "trace": {
+        "addonReceivedAt": 1793250845.4327135,
+        "addonDispatchedAt": 1793250845.4327135,
+        "addonCompletedAt": 1793250845.4354494,
+        "addonAttemptDurationMs": 2.7779200026998296
+      },
+      "ws_event_time": "2026-10-29T05:14:05.435010+00:00",
+      "ws_observed": 0.37,
+      "result": "pass",
+      "receipt_reopened": true
+    }
+  ],
+  "scope": "HA service/state protocol only; no hardware, native UI, ownership or cloud routing",
+  "camera": "skipped: application preview is a placeholder; no implemented stream/snapshot client path found",
+  "addon_source_revision": "e8a69a87c9ef985e710a47658f3d718b0bf91943",
+  "run_py_sha256": "8d9271444257c0e8a324e7c6950c5bd7847b502d532c2af9367219f41162f9d7",
+  "image_digest": "sha256:23f4dfbb69ce76315dbc4de7915504f1c2dcecd7ca2648113a493a385972e133",
+  "network_internal": true,
+  "host_network": false,
+  "home_credentials_present": false,
+  "port_binding": "127.0.0.1:18123:8123",
+  "journal": {
+    "sha256": "3fd46436871c401434c4729a6978982dfc5f6b5f5dda7f847cd966ae26177598",
+    "rows": 3,
+    "integrity": "ok"
+  },
+  "schema_review": {
+    "climate": "DeviceCommands.setTemperature \u2192 serviceData.temperature; backend allows set_temperature",
+    "lock": "DeviceProvider explicit lock/unlock; backend allows lock/unlock",
+    "media_player": "backend allows volume_set; generic serviceData forwards volume_level; card renderer reads normalized0..1",
+    "camera": "CameraCardRenderer placeholder; no stream/snapshot client path found"
+  }
+}
