@@ -1,4 +1,4 @@
-# Unreleased — Verified Home Assistant wrapper relationships (requires backend gate)
+# 1.0.62 — Verified Home Assistant wrapper relationships
 
 - Publish only exact, non-inverted switch_as_x wrapper/source registry relationships; never infer links from labels, states or shared hardware.
 - Reject ambiguous, disabled, malformed or chained relationships. Read fresh registry evidence with bounded timeouts, captured cloud sessions and monotonic sequences.
